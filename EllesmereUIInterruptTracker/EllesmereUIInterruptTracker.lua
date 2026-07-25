@@ -52,11 +52,26 @@ local recentInterrupts = {}
 local cdTicker = nil
 
 -------------------------------------------------------------------------------
---  Combat fade: lerp alpha 0 ↔ 1 over FADE_DURATION seconds via OnUpdate
+--  Combat fade: lerp alpha 0 ↔ 1 over FADE_DURATION seconds via OnUpdate.
+--  Always visible while inside an instance, regardless of combat state.
 -------------------------------------------------------------------------------
 local FADE_DURATION = 0.3
 local fadeTarget    = 1   -- 1 = fully visible, 0 = transparent
 local fadeAlpha     = 1
+local inInstance    = false
+
+local function RefreshFadeTarget()
+    if inInstance then
+        fadeTarget = 1
+    else
+        fadeTarget = InCombatLockdown() and 1 or 0
+    end
+end
+
+local function CheckInstanceState()
+    inInstance = IsInInstance()
+    RefreshFadeTarget()
+end
 
 -------------------------------------------------------------------------------
 --  Inspect throttle: 1 request per unit per 5 s
@@ -138,6 +153,30 @@ local function HasRecentInterrupt()
 end
 
 -------------------------------------------------------------------------------
+--  Update a bar's recharge graph: black baseline, red fill grows from 0 to
+--  full width as the tracked interrupt recharges; hidden once ready.
+-------------------------------------------------------------------------------
+local function UpdateBarCDGraph(bar, remaining, duration)
+    if not bar or not bar.cdBarFill then return end
+
+    if remaining <= 0 or not duration or duration <= 0 then
+        bar.cdBarFill:Hide()
+        return
+    end
+
+    local frac = 1 - (remaining / duration)
+    if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+
+    local width = bar:GetWidth() * frac
+    if width <= 0 then
+        bar.cdBarFill:Hide()
+    else
+        bar.cdBarFill:SetWidth(width)
+        bar.cdBarFill:Show()
+    end
+end
+
+-------------------------------------------------------------------------------
 --  Update the CD text on one bar, applying kick-state colourisation.
 --
 --  In Midnight, C_Spell.GetSpellCooldown hides startTime/duration from Lua
@@ -152,6 +191,7 @@ local function UpdateBarCDText(unit, info)
     local data = info.data
     if not data or data == false then
         bar.cdText:SetText("|cff888888—|r")
+        UpdateBarCDGraph(bar, 0, nil)
         return
     end
 
@@ -171,6 +211,8 @@ local function UpdateBarCDText(unit, info)
             if remaining < 0 then remaining = 0 end
         end
     end
+
+    UpdateBarCDGraph(bar, remaining, info.cdDuration)
 
     -- Choose colour based on kick state (only when detection is enabled)
     local p = db and db.profile
@@ -215,26 +257,68 @@ local function RefreshTicker()
 end
 
 -------------------------------------------------------------------------------
+--  Apply EllesmereUI's shared dark-theme font (Expressway + configured
+--  outline/shadow) to a FontString, matching every other module's text
+--  instead of falling back to Blizzard's default GameFontNormal.
+-------------------------------------------------------------------------------
+local function ApplyEUIFont(fs, size)
+    if not (fs and fs.SetFont) then return end
+    local useShadow = EllesmereUI.GetFontUseShadow and EllesmereUI.GetFontUseShadow()
+    if EllesmereUI.PrimeFontShadow then EllesmereUI.PrimeFontShadow(fs, useShadow) end
+    local path    = (EllesmereUI.GetFontPath and EllesmereUI.GetFontPath())
+                    or "Interface\\AddOns\\EllesmereUI\\media\\fonts\\Expressway.TTF"
+    local outline = (EllesmereUI.GetFontOutlineFlag and EllesmereUI.GetFontOutlineFlag()) or ""
+    fs:SetFont(path, size, outline)
+end
+
+-------------------------------------------------------------------------------
 --  Bar pool helpers
 -------------------------------------------------------------------------------
 local function GetBarFrame(index, parent)
     if barPool[index] then return barPool[index] end
     local f = CreateFrame("Frame", nil, parent)
 
+    -- Recharge graph: black baseline, red fill grows as the interrupt recharges
+    local cdBarBG = f:CreateTexture(nil, "BACKGROUND", nil, -8)
+    cdBarBG:SetColorTexture(0, 0, 0, 1)
+    f.cdBarBG = cdBarBG
+
+    local cdBarFill = f:CreateTexture(nil, "BACKGROUND", nil, -7)
+    cdBarFill:SetColorTexture(0.8, 0.1, 0.1, 1)
+    cdBarFill:Hide()
+    f.cdBarFill = cdBarFill
+
+    -- Standard 1px dark-theme border around the whole row (matches
+    -- PP.CreateBorder usage across every other EllesmereUI module)
+    if PP.CreateBorder then PP.CreateBorder(f, 0, 0, 0, 1, 1, "OVERLAY", 7) end
+
     local classIcon = f:CreateTexture(nil, "ARTWORK")
     classIcon:SetSnapToPixelGrid(false)
     classIcon:SetTexelSnappingBias(0)
     f.classIcon = classIcon
 
-    local spellIcon = f:CreateTexture(nil, "ARTWORK")
+    -- Spell icon sits in its own frame so it can carry a standard 1px
+    -- border (PP.CreateBorder needs a real frame, not a bare texture) —
+    -- same wrapper pattern as EllesmereUIUnitFrames' castbar icon.
+    local spellIconFrame = CreateFrame("Frame", nil, f)
+    local spellIconBg = spellIconFrame:CreateTexture(nil, "BACKGROUND")
+    spellIconBg:SetAllPoints()
+    spellIconBg:SetColorTexture(0, 0, 0, 1)
+    if PP.CreateBorder then PP.CreateBorder(spellIconFrame, 0, 0, 0, 1) end
+    f.spellIconFrame = spellIconFrame
+
+    local spellIcon = spellIconFrame:CreateTexture(nil, "ARTWORK")
     spellIcon:SetSnapToPixelGrid(false)
     spellIcon:SetTexelSnappingBias(0)
+    PP.SetInside(spellIcon, spellIconFrame, 1, 1)
     f.spellIcon = spellIcon
 
-    local nameText = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    local nameText = f:CreateFontString(nil, "OVERLAY")
+    ApplyEUIFont(nameText, 12)
     f.nameText = nameText
 
-    local cdText = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    local cdText = f:CreateFontString(nil, "OVERLAY")
+    ApplyEUIFont(cdText, 12)
     cdText:SetText("")
     f.cdText = cdText
 
@@ -273,6 +357,12 @@ local function LayoutBar(bar, entry, p)
 
     bar:SetSize(bw, bh)
 
+    -- Recharge graph background (full bar, black) + fill (red, variable width)
+    PP.SetInside(bar.cdBarBG, bar, 0, 0)
+    bar.cdBarFill:ClearAllPoints()
+    PP.Point(bar.cdBarFill, "TOPLEFT", bar, "TOPLEFT", 0, 0)
+    PP.Point(bar.cdBarFill, "BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 0)
+
     -- Class icon
     bar.classIcon:SetSize(sz, sz)
     bar.classIcon:ClearAllPoints()
@@ -289,9 +379,9 @@ local function LayoutBar(bar, entry, p)
     end
 
     -- Spell icon
-    bar.spellIcon:SetSize(sz, sz)
-    bar.spellIcon:ClearAllPoints()
-    PP.Point(bar.spellIcon, "LEFT", bar.classIcon, "RIGHT", 2, 0)
+    bar.spellIconFrame:SetSize(sz, sz)
+    bar.spellIconFrame:ClearAllPoints()
+    PP.Point(bar.spellIconFrame, "LEFT", bar.classIcon, "RIGHT", 2, 0)
 
     if data and data.spellID and data.spellID ~= 0 then
         local tex = C_Spell.GetSpellTexture(data.spellID)
@@ -300,17 +390,17 @@ local function LayoutBar(bar, entry, p)
             bar.spellIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
             bar.spellIcon:SetDesaturated(false)
             bar.spellIcon:SetVertexColor(1, 1, 1, 1)
-            bar.spellIcon:Show()
+            bar.spellIconFrame:Show()
         else
-            bar.spellIcon:Hide()
+            bar.spellIconFrame:Hide()
         end
     else
-        bar.spellIcon:Hide()
+        bar.spellIconFrame:Hide()
     end
 
     -- Name text
     bar.nameText:ClearAllPoints()
-    PP.Point(bar.nameText, "LEFT", bar.spellIcon, "RIGHT", 4, 0)
+    PP.Point(bar.nameText, "LEFT", bar.spellIconFrame, "RIGHT", 4, 0)
     bar.nameText:SetWidth(bw - sz - sz - 2 - 4 - 30)
     bar.nameText:SetJustifyH("LEFT")
     if data == false then
@@ -486,6 +576,62 @@ end
 _G._EIT_Apply = Apply
 
 -------------------------------------------------------------------------------
+--  Taint resolver: strip the "secret value" taint from a spellID by routing
+--  it through a hidden Slider's OnValueChanged callback, which re-emits the
+--  value from C++ context. Party/raid members' spellID on UNIT_SPELLCAST_*
+--  events is a secret value in Midnight (only the local player and pet are
+--  exempt), so without this every other tracked player's cooldown would
+--  never start. This is an undocumented engine quirk, not a supported API
+--  (the same technique is used in production by e.g. BliZzi Party Tools'
+--  BIT.Taint:ResolveNumber) — if Blizzard closes it, this simply returns
+--  nil and callers fall back to "unknown", never crashing.
+-------------------------------------------------------------------------------
+local ResolveSecretSpellID
+do
+    local slider = CreateFrame("Slider", nil, UIParent)
+    slider:SetMinMaxValues(0, 9999999)
+    slider:SetSize(1, 1)
+    slider:Hide()
+
+    local result
+    slider:SetScript("OnValueChanged", function(_, v) result = v end)
+
+    local function IsClean(n)
+        if type(n) ~= "number" then return false end
+        local ok = pcall(function() local _ = ({ [n] = true })[n] end)
+        return ok
+    end
+
+    function ResolveSecretSpellID(raw)
+        if raw == nil then return nil end
+        if type(raw) == "number" and IsClean(raw) then return raw end
+
+        -- Fast path: string.format often strips taint from numeric primitives.
+        local okF, s = pcall(string.format, "%.0f", raw)
+        if okF and s then
+            local okN, num = pcall(tonumber, s)
+            if okN and num and IsClean(num) then return num end
+        end
+
+        -- Slider path: launder through a C++ OnValueChanged callback.
+        -- The two SetValue calls MUST be in separate pcalls: sharing one
+        -- pcall means a successful reset-to-0 followed by a silently
+        -- failing tainted SetValue(raw) would leave `result` stuck at the
+        -- stale 0, reporting a false clean value instead of a failure.
+        result = nil
+        pcall(slider.SetValue, slider, 0)
+        result = nil
+        local okS = pcall(slider.SetValue, slider, raw)
+        if okS and result and result ~= 0 then
+            local okN, num = pcall(tonumber, result)
+            if okN and num and IsClean(num) then return num end
+        end
+
+        return nil
+    end
+end
+
+-------------------------------------------------------------------------------
 --  Event frame
 -------------------------------------------------------------------------------
 local eventFrame = CreateFrame("Frame")
@@ -499,6 +645,8 @@ eventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 eventFrame:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 
 eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "GROUP_ROSTER_UPDATE" then
@@ -548,7 +696,10 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_SPELLCAST_SENT" then
         -- unit, target, castGUID, spellID
         local unit, _, _, spellID = ...
-        if issecretvalue(spellID) then return end
+        if issecretvalue(spellID) then
+            spellID = ResolveSecretSpellID(spellID)
+            if not spellID then return end
+        end
         local p = db and db.profile
         if not (p and p.failedKickDetection) then return end
         local info = trackedPlayers[unit]
@@ -560,7 +711,10 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         -- unit, castGUID, spellID
         local unit, _, spellID = ...
-        if issecretvalue(spellID) then return end
+        if issecretvalue(spellID) then
+            spellID = ResolveSecretSpellID(spellID)
+            if not spellID then return end
+        end
 
         -- Pet-sourced interrupts: map pet token → owner unit (replaces CLEU SPELL_CAST_SUCCESS)
         local ownerUnit = petTokenToOwnerUnit[unit]
@@ -622,10 +776,13 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         recentInterrupts[#recentInterrupts + 1] = { time = GetTime() }
 
     elseif event == "PLAYER_REGEN_DISABLED" then
-        fadeTarget = 1   -- fade in on combat start
+        RefreshFadeTarget()   -- fade in on combat start (always visible in instance)
 
     elseif event == "PLAYER_REGEN_ENABLED" then
-        fadeTarget = 0   -- fade out on combat end
+        RefreshFadeTarget()   -- fade out on combat end (unless in instance)
+
+    elseif event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED_NEW_AREA" then
+        CheckInstanceState()
     end
 end)
 
@@ -708,6 +865,7 @@ function EIT:OnEnable()
         GetBarFrame(i, containerFrame):Hide()
     end
 
+    CheckInstanceState()
     Apply()
     C_Timer.After(0, RebuildRoster)
     C_Timer.After(0.5, RegisterUnlockElements)
