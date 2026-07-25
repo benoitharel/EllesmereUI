@@ -1,0 +1,22 @@
+## Interface: 120000, 120001, 120005
+## Title: |cff0cd29fEllesmereUI|r Interrupt Tracker
+## Category: |cff0cd29fEllesmere|rUI
+## Group: EllesmereUI
+## Notes: Track group interrupt cooldowns and failed kicks
+## Author: Ellesmere
+## Version: 7.9.4
+## Dependencies: EllesmereUI
+## SavedVariables: EllesmereUIInterruptTrackerDB
+## IconTexture: Interface\AddOns\EllesmereUI\media\eg-logo.tga
+
+# Spell database (must load before main)
+EUI_InterruptTracker_Spells.lua
+
+# Main Lua
+EllesmereUIInterruptTracker.lua
+
+# Announce + rotation sync (loads after main so ns.HandleBarClick is defined before OnEnable)
+EUI_InterruptTracker_Announce.lua
+
+# Options
+EUI_InterruptTracker_Options.lua
