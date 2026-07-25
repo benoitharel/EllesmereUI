@@ -548,6 +548,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_SPELLCAST_SENT" then
         -- unit, target, castGUID, spellID
         local unit, _, _, spellID = ...
+        if issecretvalue(spellID) then return end
         local p = db and db.profile
         if not (p and p.failedKickDetection) then return end
         local info = trackedPlayers[unit]
@@ -559,6 +560,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         -- unit, castGUID, spellID
         local unit, _, spellID = ...
+        if issecretvalue(spellID) then return end
 
         -- Pet-sourced interrupts: map pet token → owner unit (replaces CLEU SPELL_CAST_SUCCESS)
         local ownerUnit = petTokenToOwnerUnit[unit]
