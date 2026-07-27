@@ -122,6 +122,13 @@ initFrame:SetScript("OnEvent", function(self)
             "Colour the CD text green on a successful interrupt and red on a whiffed kick.")
         y = y - h
 
+        -- Assume unreadable casts
+        _, h = W:Toggle(parent, "Assume Unreadable Casts", y,
+            function() return DB() and DB().assumeUnreadableCasts ~= false end,
+            function(v) local p = DB(); if p then p.assumeUnreadableCasts = v end; Refresh() end,
+            "Since Midnight, a group member's spell ID is sometimes completely unreadable. When that happens, credit the cast as their interrupt if their interrupt is currently ready. Keeps failed kicks tracked (a whiff still starts the cooldown), at the cost of the occasional early start. Turn off for stricter tracking.")
+        y = y - h
+
         -- Show in Party / Show in Raid (dual row)
         _, h = W:DualRow(parent, y,
             {
@@ -137,6 +144,29 @@ initFrame:SetScript("OnEvent", function(self)
                 getValue = function() return DB() and DB().showInRaid end,
                 setValue = function(v) local p = DB(); if p then p.showInRaid = v end; Refresh() end,
                 tooltip  = "Track interrupts when in a raid.",
+            })
+        y = y - h
+
+        -- Show When Solo / Keep Visible Out of Combat (dual row)
+        _, h = W:DualRow(parent, y,
+            {
+                type     = "toggle",
+                text     = "Show When Solo",
+                getValue = function() return DB() and DB().showSolo ~= false end,
+                setValue = function(v)
+                    local p = DB(); if p then p.showSolo = v end
+                    -- Changes which units are tracked, so redraw alone is not enough.
+                    if _G._EIT_RebuildRoster then _G._EIT_RebuildRoster() end
+                    Refresh()
+                end,
+                tooltip  = "Show your own interrupt bar when you are not in a group.",
+            },
+            {
+                type     = "toggle",
+                text     = "Solo: Keep Out of Combat",
+                getValue = function() return DB() and DB().soloOutOfCombat ~= false end,
+                setValue = function(v) local p = DB(); if p then p.soloOutOfCombat = v end; Refresh() end,
+                tooltip  = "While solo in the open world, stay visible out of combat instead of fading away. Has no effect in a group; instances are always visible.",
             })
         y = y - h
 
@@ -173,6 +203,15 @@ initFrame:SetScript("OnEvent", function(self)
             function() return DB() and DB().growUpward end,
             function(v) local p = DB(); if p then p.growUpward = v end; Refresh() end,
             "Stack bars from the bottom up instead of top down.")
+        y = y - h
+
+        -- Sort Order dropdown
+        _, h = W:Dropdown(parent, "Sort Order", y,
+            { ASC = "Ready first", DESC = "Longest cooldown first" },
+            function() return (DB() and DB().sortDescending) and "DESC" or "ASC" end,
+            function(v) local p = DB(); if p then p.sortDescending = (v == "DESC") end; Refresh() end,
+            { "ASC", "DESC" },
+            "Bars are ordered by remaining cooldown. \"Ready first\" puts usable interrupts at the top and the longest cooldown at the bottom; the reverse flips it.")
         y = y - h
 
         -- Announce Channel dropdown

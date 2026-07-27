@@ -15,8 +15,9 @@ local CLASS_ICON_TEX = "Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CL
 local MAX_BARS       = 40
 
 local DEFAULTS = { profile = {
-    enabled             = true,
-    failedKickDetection = true,
+    enabled               = true,
+    failedKickDetection   = true,
+    assumeUnreadableCasts = true,
     growUpward          = false,
     barWidth            = 200,
     barHeight           = 20,
@@ -26,6 +27,9 @@ local DEFAULTS = { profile = {
     posY                = 0,
     showInParty         = true,
     showInRaid          = false,
+    showSolo            = true,
+    soloOutOfCombat     = true,
+    sortDescending      = false,
     announceChannel     = "PARTY",
     kickRotation        = {},
 } }
@@ -61,7 +65,12 @@ local fadeAlpha     = 1
 local inInstance    = false
 
 local function RefreshFadeTarget()
+    local p = db and db.profile
     if inInstance then
+        fadeTarget = 1
+    elseif p and p.soloOutOfCombat ~= false and not IsInGroup() then
+        -- Solo in the open world: stay visible out of combat too, otherwise
+        -- "Show When Solo" would look broken (the bar exists but is alpha 0).
         fadeTarget = 1
     else
         fadeTarget = InCombatLockdown() and 1 or 0
@@ -100,24 +109,20 @@ local function ProcessInspectQueue()
 end
 
 -------------------------------------------------------------------------------
---  Effective CD for a unit: applies talent aura reduction for local player.
---  For other units, talent reduction is not reliably detectable — use base CD.
+--  Effective CD for a unit.
+--
+--  For the local player the game reports the true cooldown, with talent
+--  reductions and any other modifier already applied — so we just read it.
+--  For every other unit no API exposes cooldowns at all, so the static base
+--  value is the best estimate available; it will be too long for a talented
+--  member, and that is a hard limit of the client rather than an oversight.
 -------------------------------------------------------------------------------
 local function GetEffectiveCD(unit, data)
     if not data or data == false then return nil end
-    if unit == "player" and ns.TALENT_CD then
-        for _, t in pairs(ns.TALENT_CD) do
-            if t.interruptSpellID == data.spellID
-               and t.talentSpellID ~= 0
-               and t.newCD > 0
-            then
-                if GetPlayerAuraBySpellID(t.talentSpellID) then
-                    return t.newCD
-                end
-            end
-        end
+    if unit == "player" and EllesmereUI.SpellCD then
+        local _, duration = EllesmereUI.SpellCD.GetReal(data.spellID)
+        if duration then return duration end
     end
-    -- best-effort: talent reduction not detectable for others
     return data.cd
 end
 
@@ -164,10 +169,15 @@ local function UpdateBarCDGraph(bar, remaining, duration)
         return
     end
 
-    local frac = 1 - (remaining / duration)
+    -- Fraction of the cooldown STILL REMAINING: the red overlay covers the
+    -- whole track the moment the interrupt is used and is eaten away by the
+    -- black backing as it recharges, leaving an all-black bar when ready.
+    local frac = remaining / duration
     if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
 
-    local width = bar:GetWidth() * frac
+    -- Measured against the visible track (right of the icons), not the whole
+    -- bar -- see the graphInset note in LayoutBar.
+    local width = (bar._cdFillMaxWidth or bar:GetWidth()) * frac
     if width <= 0 then
         bar.cdBarFill:Hide()
     else
@@ -179,10 +189,15 @@ end
 -------------------------------------------------------------------------------
 --  Update the CD text on one bar, applying kick-state colourisation.
 --
---  In Midnight, C_Spell.GetSpellCooldown hides startTime/duration from Lua
---  (they are protected values).  Only isActive and isOnGCD are safe to read.
---  We therefore track cdStart/cdDuration ourselves for all units, and use
---  isActive/isOnGCD only to detect when the player's spell becomes ready.
+--  Cooldowns are tracked from cast events for every unit. For the local player
+--  we additionally CORRECT that bookkeeping against the client's own figures
+--  when they are readable, which is what makes talent-reduced cooldowns and
+--  reset effects accurate.
+--
+--  The API is only ever used to correct, never as the sole source: in Midnight
+--  a spell's timing fields are frequently secret, and treating "unreadable" as
+--  "ready" would wipe a valid running cooldown and show READY for its whole
+--  duration. Only an explicit isActive == false clears the tracking.
 -------------------------------------------------------------------------------
 local function UpdateBarCDText(unit, info)
     local bar = info.barFrame
@@ -195,21 +210,24 @@ local function UpdateBarCDText(unit, info)
         return
     end
 
-    -- Compute remaining seconds from our tracked cdStart/cdDuration
+    if unit == "player" and EllesmereUI.SpellCD then
+        local SpellCD = EllesmereUI.SpellCD
+        -- NOTE: must not be written as `SpellCD and SpellCD.GetReal(...)` --
+        -- an `and` expression yields a single value, dropping `duration`.
+        local start, duration = SpellCD.GetReal(data.spellID)
+        if start then
+            info.cdStart, info.cdDuration = start, duration
+        elseif SpellCD.IsActive(data.spellID) == false then
+            -- Positively ready (finished, or reset by an ability).
+            info.cdStart, info.cdDuration = nil, nil
+        end
+        -- Otherwise unreadable: keep what the cast event gave us.
+    end
+
     local remaining = 0
-    if unit == "player" then
-        -- Use isActive/isOnGCD to know if the spell is actually on its own CD
-        local cdInfo    = C_Spell.GetSpellCooldown(data.spellID)
-        local onRealCD  = cdInfo and cdInfo.isActive and not cdInfo.isOnGCD
-        if onRealCD and info.cdStart and info.cdDuration then
-            remaining = (info.cdStart + info.cdDuration) - GetTime()
-            if remaining < 0 then remaining = 0 end
-        end
-    else
-        if info.cdStart and info.cdDuration then
-            remaining = (info.cdStart + info.cdDuration) - GetTime()
-            if remaining < 0 then remaining = 0 end
-        end
+    if info.cdStart and info.cdDuration then
+        remaining = (info.cdStart + info.cdDuration) - GetTime()
+        if remaining < 0 then remaining = 0 end
     end
 
     UpdateBarCDGraph(bar, remaining, info.cdDuration)
@@ -234,12 +252,62 @@ local function UpdateBarCDText(unit, info)
 end
 
 -------------------------------------------------------------------------------
---  Ticker callback: refresh every tracked player's CD text
+--  Ordering
+--
+--  Bars are sorted by REMAINING cooldown: ready interrupts (0 s) sit at the
+--  top and the longest cooldown at the bottom, so the kicks you can actually
+--  call on are always the ones nearest the top. Descending flips it.
+--  Ties (e.g. several ready players) fall back to the unit token so the order
+--  stays stable instead of shuffling between frames.
+-------------------------------------------------------------------------------
+local function GetRemaining(info)
+    if not info or not info.cdStart or not info.cdDuration then return 0 end
+    local r = (info.cdStart + info.cdDuration) - GetTime()
+    if r < 0 then r = 0 end
+    return r
+end
+
+local function SortEntries(entries)
+    local desc = db and db.profile and db.profile.sortDescending
+    table.sort(entries, function(a, b)
+        local ra, rb = GetRemaining(a.info), GetRemaining(b.info)
+        if ra ~= rb then
+            if desc then return ra > rb end
+            return ra < rb
+        end
+        return a.unit < b.unit
+    end)
+end
+
+-- Signature of the currently displayed order, so the ticker can tell when the
+-- ranking actually changed and only then pay for a relayout.
+local displayedOrder = ""
+
+local function BuildOrderKey(entries)
+    local parts = {}
+    for i, e in ipairs(entries) do parts[i] = e.unit end
+    return table.concat(parts, "|")
+end
+
+local RebuildDisplay   -- forward declaration (UpdateAllCDs re-sorts through it)
+
+-------------------------------------------------------------------------------
+--  Ticker callback: refresh every tracked player's CD text, and re-sort when
+--  ticking cooldowns have changed the ranking.
 -------------------------------------------------------------------------------
 local function UpdateAllCDs()
     if not db or not db.profile or not db.profile.enabled then return end
     for unit, info in pairs(trackedPlayers) do
         UpdateBarCDText(unit, info)
+    end
+
+    local entries = {}
+    for unit, info in pairs(trackedPlayers) do
+        entries[#entries + 1] = { unit = unit, info = info }
+    end
+    SortEntries(entries)
+    if BuildOrderKey(entries) ~= displayedOrder then
+        RebuildDisplay()
     end
 end
 
@@ -278,7 +346,8 @@ local function GetBarFrame(index, parent)
     if barPool[index] then return barPool[index] end
     local f = CreateFrame("Frame", nil, parent)
 
-    -- Recharge graph: black baseline, red fill grows as the interrupt recharges
+    -- Recharge graph: black backing, red overlay covering the part of the
+    -- cooldown still remaining (full red on cast → all black when ready)
     local cdBarBG = f:CreateTexture(nil, "BACKGROUND", nil, -8)
     cdBarBG:SetColorTexture(0, 0, 0, 1)
     f.cdBarBG = cdBarBG
@@ -357,11 +426,23 @@ local function LayoutBar(bar, entry, p)
 
     bar:SetSize(bw, bh)
 
-    -- Recharge graph background (full bar, black) + fill (red, variable width)
+    -- Recharge graph: black backing across the whole row, red fill starting
+    -- AFTER the icons and aligned with the name text. The icons draw on
+    -- ARTWORK, above the BACKGROUND layer the fill lives on, so a fill
+    -- anchored to the bar's left edge spends its first two icon widths
+    -- completely hidden behind them.
     PP.SetInside(bar.cdBarBG, bar, 0, 0)
+
+    -- class icon + gap + spell icon + gap -- same offsets the name text uses.
+    local graphInset = sz + 2 + sz + 4
+    bar._cdFillMaxWidth = math.max(bw - graphInset, 1)
+
+    -- Anchored to the RIGHT edge: the red overlay is widest right after the
+    -- cast and shrinks rightwards, so the black backing appears to fill the
+    -- bar from the left as the interrupt recharges.
     bar.cdBarFill:ClearAllPoints()
-    PP.Point(bar.cdBarFill, "TOPLEFT", bar, "TOPLEFT", 0, 0)
-    PP.Point(bar.cdBarFill, "BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 0)
+    PP.Point(bar.cdBarFill, "TOPRIGHT", bar, "TOPRIGHT", 0, 0)
+    PP.Point(bar.cdBarFill, "BOTTOMRIGHT", bar, "BOTTOMRIGHT", 0, 0)
 
     -- Class icon
     bar.classIcon:SetSize(sz, sz)
@@ -427,7 +508,7 @@ end
 --  Rebuild and redraw all bars from trackedPlayers.
 --  Stores a barFrame reference in each entry so the CD ticker can find it.
 -------------------------------------------------------------------------------
-local function RebuildDisplay()
+function RebuildDisplay()
     if not containerFrame or not db or not db.profile then return end
     local p = db.profile
     if not p.enabled then
@@ -439,7 +520,8 @@ local function RebuildDisplay()
     for unit, info in pairs(trackedPlayers) do
         entries[#entries + 1] = { unit = unit, info = info }
     end
-    table.sort(entries, function(a, b) return a.unit < b.unit end)
+    SortEntries(entries)
+    displayedOrder = BuildOrderKey(entries)
 
     local count = #entries
     local totalH = count * p.barHeight + (count > 0 and (count - 1) * p.barSpacing or 0)
@@ -541,8 +623,9 @@ local function RebuildRoster()
         end
     end
 
-    -- Always include local player (spec known immediately)
-    do
+    -- Local player (spec known immediately). Always tracked while grouped;
+    -- when ungrouped it is the only bar, so "Show When Solo" gates it.
+    if inParty or p.showSolo ~= false then
         local _, classToken = UnitClass("player")
         local specIndex     = GetSpecialization()
         local specID        = specIndex and GetSpecializationInfo(specIndex) or nil
@@ -571,64 +654,95 @@ local function Apply()
     containerFrame:ClearAllPoints()
     PP.Point(containerFrame, "CENTER", UIParent, "CENTER", p.posX or 0, p.posY or 0)
     RebuildDisplay()
+    -- Fade rules depend on profile options (solo visibility), so a settings
+    -- change must re-evaluate them rather than wait for the next combat event.
+    RefreshFadeTarget()
 end
 
 _G._EIT_Apply = Apply
 
--------------------------------------------------------------------------------
---  Taint resolver: strip the "secret value" taint from a spellID by routing
---  it through a hidden Slider's OnValueChanged callback, which re-emits the
---  value from C++ context. Party/raid members' spellID on UNIT_SPELLCAST_*
---  events is a secret value in Midnight (only the local player and pet are
---  exempt), so without this every other tracked player's cooldown would
---  never start. This is an undocumented engine quirk, not a supported API
---  (the same technique is used in production by e.g. BliZzi Party Tools'
---  BIT.Taint:ResolveNumber) — if Blizzard closes it, this simply returns
---  nil and callers fall back to "unknown", never crashing.
--------------------------------------------------------------------------------
-local ResolveSecretSpellID
-do
-    local slider = CreateFrame("Slider", nil, UIParent)
-    slider:SetMinMaxValues(0, 9999999)
-    slider:SetSize(1, 1)
-    slider:Hide()
+-- Exposed for the options page: toggles that change WHICH units are tracked
+-- need a roster rebuild, not just a redraw. Kept separate from Apply so frame
+-- dragging in unlock mode stays cheap and never wipes running cooldowns.
+_G._EIT_RebuildRoster = RebuildRoster
 
-    local result
-    slider:SetScript("OnValueChanged", function(_, v) result = v end)
+-------------------------------------------------------------------------------
+--  Cast → tracked-spell matching.
+--
+--  Since Midnight the spellID on UNIT_SPELLCAST_* is a SECRET value for every
+--  unit but the local player and its pet, so a plain numeric comparison is
+--  impossible. EllesmereUI.SpellMatch runs a cascade (direct → name → base
+--  spell → slider laundering); the name step is what actually resolves party
+--  members' casts. See EllesmereUI_SpellMatch.lua.
+--
+--  Returns:
+--    true            -- this cast IS the unit's tracked interrupt
+--    false, "other"  -- resolved, and it is some OTHER spell
+--    false, "unknown"-- could not be resolved either way
+-------------------------------------------------------------------------------
+local oneCandidate = {}   -- reused scratch array (handler is not re-entrant)
 
-    local function IsClean(n)
-        if type(n) ~= "number" then return false end
-        local ok = pcall(function() local _ = ({ [n] = true })[n] end)
-        return ok
+local function MatchesInterrupt(rawSpellID, data)
+    local SM = EllesmereUI.SpellMatch
+    if not SM or not data or data == false or not data.spellID then
+        return false, "unknown"
+    end
+    oneCandidate[1] = data.spellID
+    local matched, _, conclusive = SM.FindMatch(rawSpellID, oneCandidate)
+    if matched then return true end
+    -- `conclusive` means the cast was readable and is definitely another spell.
+    return false, conclusive and "other" or "unknown"
+end
+
+-------------------------------------------------------------------------------
+--  Last-resort corroboration for an unreadable party cast.
+--
+--  When the cascade cannot identify a cast at all, assume it was the unit's
+--  tracked interrupt ONLY if that interrupt is currently READY. A spell that
+--  is still on cooldown cannot have just been cast, so this can never stomp a
+--  running timer -- the worst case is starting the CD on the first
+--  unidentifiable cast after the interrupt came back up. Mirrors the same
+--  trade-off BliZzi Party Tools makes (Core.lua:2519-2545); switch it off with
+--  the "Assume Unreadable Casts" option if the false positives bother you.
+-------------------------------------------------------------------------------
+local DRIFT_GRACE = 0.5
+
+local function InterruptIsReady(info)
+    if not info.cdStart or not info.cdDuration then return true end
+    local remaining = (info.cdStart + info.cdDuration) - GetTime()
+    return remaining <= DRIFT_GRACE
+end
+
+-------------------------------------------------------------------------------
+--  Commit a confirmed interrupt cast for a unit: start the tracked cooldown
+--  and run the failed-kick state machine. Shared by the direct and the
+--  pet-sourced cast paths.
+-------------------------------------------------------------------------------
+local function ApplyInterruptCast(unit, info)
+    info.cdStart    = GetTime()
+    info.cdDuration = GetEffectiveCD(unit, info.data)
+
+    -- Failed-kick correlation window (0.05 s lets UNIT_SPELLCAST_INTERRUPTED
+    -- arrive first).
+    local p = db and db.profile
+    if not (p and p.failedKickDetection) then
+        UpdateBarCDText(unit, info)
+        return
     end
 
-    function ResolveSecretSpellID(raw)
-        if raw == nil then return nil end
-        if type(raw) == "number" and IsClean(raw) then return raw end
-
-        -- Fast path: string.format often strips taint from numeric primitives.
-        local okF, s = pcall(string.format, "%.0f", raw)
-        if okF and s then
-            local okN, num = pcall(tonumber, s)
-            if okN and num and IsClean(num) then return num end
-        end
-
-        -- Slider path: launder through a C++ OnValueChanged callback.
-        -- The two SetValue calls MUST be in separate pcalls: sharing one
-        -- pcall means a successful reset-to-0 followed by a silently
-        -- failing tainted SetValue(raw) would leave `result` stuck at the
-        -- stale 0, reporting a false clean value instead of a failure.
-        result = nil
-        pcall(slider.SetValue, slider, 0)
-        result = nil
-        local okS = pcall(slider.SetValue, slider, raw)
-        if okS and result and result ~= 0 then
-            local okN, num = pcall(tonumber, result)
-            if okN and num and IsClean(num) then return num end
-        end
-
-        return nil
-    end
+    info.kickState = "pending"
+    C_Timer.After(0.05, function()
+        if trackedPlayers[unit] ~= info then return end
+        info.kickState = HasRecentInterrupt() and "success" or "fail"
+        UpdateBarCDText(unit, info)
+        C_Timer.After(3, function()
+            if trackedPlayers[unit] ~= info then return end
+            if info.kickState == "success" or info.kickState == "fail" then
+                info.kickState = nil
+                UpdateBarCDText(unit, info)
+            end
+        end)
+    end)
 end
 
 -------------------------------------------------------------------------------
@@ -651,6 +765,9 @@ eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "GROUP_ROSTER_UPDATE" then
         RebuildRoster()
+        -- Joining/leaving a group flips the solo fade rule; re-evaluate now
+        -- instead of waiting for the next combat or zone change.
+        RefreshFadeTarget()
 
     elseif event == "INSPECT_READY" then
         local guid = ...
@@ -682,28 +799,20 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         end
 
     elseif event == "SPELL_UPDATE_COOLDOWN" then
-        -- Check if the player's interrupt just became ready; if so, clear tracked CD
+        -- UpdateBarCDText re-reads the player's real cooldown from the API, so
+        -- it alone handles both "started" and "reset/ready" transitions.
         local playerInfo = trackedPlayers["player"]
         if playerInfo and playerInfo.data and playerInfo.data ~= false then
-            local cdInfo = C_Spell.GetSpellCooldown(playerInfo.data.spellID)
-            if cdInfo and not cdInfo.isActive then
-                playerInfo.cdStart    = nil
-                playerInfo.cdDuration = nil
-            end
             UpdateBarCDText("player", playerInfo)
         end
 
     elseif event == "UNIT_SPELLCAST_SENT" then
         -- unit, target, castGUID, spellID
         local unit, _, _, spellID = ...
-        if issecretvalue(spellID) then
-            spellID = ResolveSecretSpellID(spellID)
-            if not spellID then return end
-        end
         local p = db and db.profile
         if not (p and p.failedKickDetection) then return end
         local info = trackedPlayers[unit]
-        if info and info.data and info.data ~= false and info.data.spellID == spellID then
+        if info and info.data and info.data ~= false and MatchesInterrupt(spellID, info.data) then
             info.kickState = "pending"
             pendingKicks[info.name] = { time = GetTime() }
         end
@@ -711,64 +820,35 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         -- unit, castGUID, spellID
         local unit, _, spellID = ...
-        if issecretvalue(spellID) then
-            spellID = ResolveSecretSpellID(spellID)
-            if not spellID then return end
-        end
 
-        -- Pet-sourced interrupts: map pet token → owner unit (replaces CLEU SPELL_CAST_SUCCESS)
-        local ownerUnit = petTokenToOwnerUnit[unit]
-        if ownerUnit then
-            local ownerInfo = trackedPlayers[ownerUnit]
-            if ownerInfo and ownerInfo.data and ownerInfo.data ~= false and ownerInfo.data.spellID == spellID then
-                ownerInfo.cdStart    = GetTime()
-                ownerInfo.cdDuration = GetEffectiveCD(ownerUnit, ownerInfo.data)
-                local p = db and db.profile
-                if p and p.failedKickDetection then
-                    ownerInfo.kickState = "pending"
-                    C_Timer.After(0.05, function()
-                        if trackedPlayers[ownerUnit] ~= ownerInfo then return end
-                        ownerInfo.kickState = HasRecentInterrupt() and "success" or "fail"
-                        UpdateBarCDText(ownerUnit, ownerInfo)
-                        C_Timer.After(3, function()
-                            if trackedPlayers[ownerUnit] ~= ownerInfo then return end
-                            if ownerInfo.kickState == "success" or ownerInfo.kickState == "fail" then
-                                ownerInfo.kickState = nil
-                                UpdateBarCDText(ownerUnit, ownerInfo)
-                            end
-                        end)
-                    end)
-                end
-            end
+        -- Resolve the acting unit: a pet-sourced interrupt (Warlock Felhunter /
+        -- Felguard) is credited to its owner's bar.
+        local actor = petTokenToOwnerUnit[unit] or unit
+        local info  = trackedPlayers[actor]
+        if not info or not info.data or info.data == false then return end
+
+        local matched, reason = MatchesInterrupt(spellID, info.data)
+        if matched then
+            ApplyInterruptCast(actor, info)
             return
         end
+        if reason == "other" then return end   -- conclusively a different spell
 
-        local info = trackedPlayers[unit]
-        if not info or not info.data or info.data == false then return end
-        if info.data.spellID ~= spellID then return end
-
-        -- Track CD start for all units; Midnight hides startTime/duration even for player
-        info.cdStart    = GetTime()
-        info.cdDuration = GetEffectiveCD(unit, info.data)
-
-        -- Failed-kick correlation window (0.05 s lets UNIT_SPELLCAST_INTERRUPTED arrive first).
-        -- Force pending state here in case UNIT_SPELLCAST_SENT did not fire for this
-        -- unit (it is not guaranteed for party/raid members in all client builds).
+        -- Genuinely UNREADABLE cast: the cascade could not identify the spell at
+        -- all (readable-but-different casts already returned above, which is
+        -- what keeps this from firing on every spell a member casts).
+        --
+        -- Credit it as their interrupt while that interrupt is ready. We
+        -- deliberately do NOT require an interrupt to have actually landed:
+        -- a whiffed kick still puts the ability on cooldown, and knowing it is
+        -- unavailable is the whole point of the tracker. ApplyInterruptCast
+        -- still colours the bar red for a whiff via its own success/fail check.
+        --
+        -- The "ready" gate bounds the damage: a wrong guess can never stomp a
+        -- running timer, only start one early.
         local p = db and db.profile
-        if p and p.failedKickDetection then
-            info.kickState = "pending"
-            C_Timer.After(0.05, function()
-                if trackedPlayers[unit] ~= info then return end
-                info.kickState = HasRecentInterrupt() and "success" or "fail"
-                UpdateBarCDText(unit, info)
-                C_Timer.After(3, function()
-                    if trackedPlayers[unit] ~= info then return end
-                    if info.kickState == "success" or info.kickState == "fail" then
-                        info.kickState = nil
-                        UpdateBarCDText(unit, info)
-                    end
-                end)
-            end)
+        if p and p.assumeUnreadableCasts ~= false and InterruptIsReady(info) then
+            ApplyInterruptCast(actor, info)
         end
 
     elseif event == "UNIT_SPELLCAST_INTERRUPTED" then

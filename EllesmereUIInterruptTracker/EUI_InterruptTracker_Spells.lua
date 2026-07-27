@@ -48,38 +48,13 @@ ns.SPEC_OVERRIDE = {
 }
 
 -------------------------------------------------------------------------------
---  Talent CD reductions.
---  talentSpellID is the talent's own spell ID as it appears on the talent tree
---  node.  Several are unverifiable outside the live client and are left as 0.
---  Talent detection for non-player units is best-effort only (inspection is
---  unreliable); defaults are used when talent data is unavailable.
+--  Talent CD reductions used to live here, keyed by talent spell ID. The table
+--  never worked (every entry had talentSpellID = 0, so nothing could match) and
+--  is now unnecessary: the local player's real cooldown is read straight from
+--  C_Spell.GetSpellCooldown, which already accounts for talents and every other
+--  modifier. Other players' cooldowns are not exposed by any API, so no amount
+--  of talent data would let us compute theirs reliably.
 -------------------------------------------------------------------------------
-ns.TALENT_CD = {
-    coldthirst = {
-        -- TODO: confirm talentSpellID in-game (DK talent node)
-        talentSpellID   = 0,
-        interruptSpellID = 47528,
-        newCD = 12,
-    },
-    interwovenThreads = {
-        -- TODO: confirm talentSpellID in-game (Evoker talent node)
-        talentSpellID   = 0,
-        interruptSpellID = 351338,
-        newCD = 30,
-    },
-    quickWitted = {
-        -- TODO: confirm talentSpellID in-game (Mage talent node)
-        talentSpellID   = 0,
-        interruptSpellID = 2139,
-        newCD = 20,
-    },
-    loneSurvivor = {
-        -- TODO: confirm talentSpellID and reduced CD in-game (Hunter talent node)
-        talentSpellID   = 0,
-        interruptSpellID = 147362,
-        newCD = 0, -- unknown; verify in-game
-    },
-}
 
 -------------------------------------------------------------------------------
 --  GetInterruptData(classToken, specID) → data table | false | nil
