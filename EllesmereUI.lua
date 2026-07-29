@@ -316,6 +316,7 @@ local ADDON_ROSTER = {
     { folder = "EllesmereUIDataBars",          display = "DataBars",             search_name = "EllesmereUI DataBars"                },
     { folder = "EllesmereUIQuickdraw",         display = "Quickdraw",            search_name = "EllesmereUI Quickdraw"               },
     { folder = "EllesmereUIPartyMode",         display = "Party Mode",           search_name = "EllesmereUI Party Mode",             alwaysLoaded = true },
+    { folder = "EllesmereUIInterruptTracker",  display = "Interrupt Tracker",    search_name = "EllesmereUI Interrupt Tracker"       },
 }
 
 -------------------------------------------------------------------------------
@@ -345,6 +346,7 @@ EllesmereUI.ADDON_GROUPS = {
             "EllesmereUIDataBars",
             "EllesmereUIQuickdraw",
             "EllesmereUIPartyMode",
+            "EllesmereUIInterruptTracker",
         },
     },
     {
@@ -10340,6 +10342,7 @@ function EllesmereUI:RegisterModule(folderName, config)
         EllesmereUIBags = true,
         EllesmereUIDataBars = true,
         EllesmereUIQuickdraw = true,
+        EllesmereUIInterruptTracker = true,
     }
     if callerFolder and not ALLOWED[callerFolder] then return end
     -- Suite-core marker (module key is a suite folder), gating the toolbar whitelists:
