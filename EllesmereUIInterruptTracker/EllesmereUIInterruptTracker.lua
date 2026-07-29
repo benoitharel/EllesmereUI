@@ -30,7 +30,6 @@ local DEFAULTS = { profile = {
     showSolo            = true,
     soloOutOfCombat     = true,
     sortDescending      = false,
-    announceChannel     = "PARTY",
     kickRotation        = {},
 } }
 
@@ -45,8 +44,6 @@ local trackedPlayers = {}
 -- { [petGUID] = ownerUnit }  — populated in RebuildRoster for pet-source interrupts
 local petGuidToUnit      = {}
 local petTokenToOwnerUnit = {}
--- { [casterName] = { time = T } }
-local pendingKicks   = {}
 -- { { time = T }, ... }  — enemy interrupted-cast timestamps for correlation
 local recentInterrupts = {}
 
@@ -85,28 +82,7 @@ end
 -------------------------------------------------------------------------------
 --  Inspect throttle: 1 request per unit per 5 s
 -------------------------------------------------------------------------------
-local inspectQueue    = {}
-local inspectCooldown = {}
-local INSPECT_THROTTLE = 5
-
-local function EnqueueInspect(unit)
-    if not UnitExists(unit) or UnitIsUnit(unit, "player") then return end
-    local guid = UnitGUID(unit)
-    if not guid then return end
-    local t = GetTime()
-    if inspectCooldown[guid] and (t - inspectCooldown[guid]) < INSPECT_THROTTLE then return end
-    inspectCooldown[guid] = t
-    for _, u in ipairs(inspectQueue) do if u == unit then return end end
-    inspectQueue[#inspectQueue + 1] = unit
-end
-
-local function ProcessInspectQueue()
-    if #inspectQueue == 0 then return end
-    local unit = table.remove(inspectQueue, 1)
-    if UnitExists(unit) then
-        NotifyInspect(unit)
-    end
-end
+local inspect = EllesmereUI.NewInspectThrottle(5)
 
 -------------------------------------------------------------------------------
 --  Effective CD for a unit.
@@ -186,6 +162,12 @@ local function UpdateBarCDGraph(bar, remaining, duration)
     end
 end
 
+-- Forward declarations: RebuildDisplay lives further down (bar layout needs
+-- LayoutBar/GetBarFrame first); ScheduleExpiry lives right after SortEntries.
+-- Both are referenced from UpdateBarCDText below, hence the early declare.
+local RebuildDisplay
+local ScheduleExpiry
+
 -------------------------------------------------------------------------------
 --  Update the CD text on one bar, applying kick-state colourisation.
 --
@@ -198,28 +180,38 @@ end
 --  a spell's timing fields are frequently secret, and treating "unreadable" as
 --  "ready" would wipe a valid running cooldown and show READY for its whole
 --  duration. Only an explicit isActive == false clears the tracking.
+--
+--  Returns true when cdStart/cdDuration actually changed, so the caller knows
+--  the sort order may need to be recomputed (see ScheduleExpiry / UpdateAllCDs
+--  below -- the ranking is re-evaluated only on these transitions, never by
+--  polling every tick).
 -------------------------------------------------------------------------------
 local function UpdateBarCDText(unit, info)
     local bar = info.barFrame
-    if not bar or not bar.cdText then return end
+    if not bar or not bar.cdText then return false end
 
     local data = info.data
     if not data or data == false then
         bar.cdText:SetText("|cff888888—|r")
         UpdateBarCDGraph(bar, 0, nil)
-        return
+        return false
     end
 
+    local changed = false
     if unit == "player" and EllesmereUI.SpellCD then
         local SpellCD = EllesmereUI.SpellCD
         -- NOTE: must not be written as `SpellCD and SpellCD.GetReal(...)` --
         -- an `and` expression yields a single value, dropping `duration`.
         local start, duration = SpellCD.GetReal(data.spellID)
         if start then
-            info.cdStart, info.cdDuration = start, duration
-        elseif SpellCD.IsActive(data.spellID) == false then
+            if info.cdStart ~= start or info.cdDuration ~= duration then
+                info.cdStart, info.cdDuration = start, duration
+                changed = true
+            end
+        elseif SpellCD.IsActive(data.spellID) == false and info.cdStart then
             -- Positively ready (finished, or reset by an ability).
             info.cdStart, info.cdDuration = nil, nil
+            changed = true
         end
         -- Otherwise unreadable: keep what the cast event gave us.
     end
@@ -249,6 +241,11 @@ local function UpdateBarCDText(unit, info)
     end
 
     bar.cdText:SetText(color .. FormatCD(remaining) .. "|r")
+
+    if changed and info.cdStart and info.cdDuration then
+        ScheduleExpiry(unit, info)
+    end
+    return changed
 end
 
 -------------------------------------------------------------------------------
@@ -279,36 +276,48 @@ local function SortEntries(entries)
     end)
 end
 
--- Signature of the currently displayed order, so the ticker can tell when the
--- ranking actually changed and only then pay for a relayout.
-local displayedOrder = ""
+-------------------------------------------------------------------------------
+--  Event-driven re-sort.
+--
+--  Two running cooldowns never swap order relative to each other -- both
+--  count down at the same real-time rate, so their relative ranking can only
+--  change at three known instants: (1) a new cast starts (ApplyInterruptCast
+--  calls RebuildDisplay directly), (2) a tracked cooldown reaches 0 (this
+--  one-shot timer), or (3) the local player's real API cooldown is corrected
+--  (UpdateBarCDText calls this when that happens). There is therefore no need
+--  to poll "did the order change?" every 0.1 s tick -- the ranking is
+--  recomputed exactly when it can possibly change, and not otherwise.
+--
+--  `expiryGen` invalidates a stale timer instead of cancelling it outright
+--  (same generation-counter pattern as the announce lock elsewhere in this
+--  addon family): if the cooldown is re-armed by a newer cast or correction
+--  before the old timer fires, the old one becomes a no-op.
+-------------------------------------------------------------------------------
+local expiryGen = {}   -- [unit] = current generation
 
-local function BuildOrderKey(entries)
-    local parts = {}
-    for i, e in ipairs(entries) do parts[i] = e.unit end
-    return table.concat(parts, "|")
+function ScheduleExpiry(unit, info)
+    local gen = (expiryGen[unit] or 0) + 1
+    expiryGen[unit] = gen
+    C_Timer.After(info.cdDuration, function()
+        if expiryGen[unit] ~= gen then return end        -- superseded
+        if trackedPlayers[unit] ~= info then return end   -- roster changed
+        RebuildDisplay()
+    end)
 end
 
-local RebuildDisplay   -- forward declaration (UpdateAllCDs re-sorts through it)
-
 -------------------------------------------------------------------------------
---  Ticker callback: refresh every tracked player's CD text, and re-sort when
---  ticking cooldowns have changed the ranking.
+--  Ticker callback: refresh every tracked player's CD text every 0.1 s (kept
+--  at this cadence purely so the "12.3s" label stays visually smooth -- see
+--  UpdateBarCDText). The ranking itself is only rebuilt when UpdateBarCDText
+--  reports an actual cdStart/cdDuration change, never unconditionally.
 -------------------------------------------------------------------------------
 local function UpdateAllCDs()
     if not db or not db.profile or not db.profile.enabled then return end
+    local needsRebuild = false
     for unit, info in pairs(trackedPlayers) do
-        UpdateBarCDText(unit, info)
+        if UpdateBarCDText(unit, info) then needsRebuild = true end
     end
-
-    local entries = {}
-    for unit, info in pairs(trackedPlayers) do
-        entries[#entries + 1] = { unit = unit, info = info }
-    end
-    SortEntries(entries)
-    if BuildOrderKey(entries) ~= displayedOrder then
-        RebuildDisplay()
-    end
+    if needsRebuild then RebuildDisplay() end
 end
 
 -------------------------------------------------------------------------------
@@ -390,27 +399,6 @@ local function GetBarFrame(index, parent)
     ApplyEUIFont(cdText, 12)
     cdText:SetText("")
     f.cdText = cdText
-
-    -- Left-click → announce (wired to ns.HandleBarClick by the announce module)
-    f:EnableMouse(true)
-    f:SetScript("OnMouseUp", function(self, button)
-        if button == "LeftButton" and ns.HandleBarClick then
-            ns.HandleBarClick(self._eit_unit, self._eit_info)
-        end
-    end)
-    -- Brief alpha flash driven by _eit_flashElapsed (set to 0 to trigger)
-    f:SetScript("OnUpdate", function(self, elapsed)
-        if not self._eit_flashElapsed then return end
-        self._eit_flashElapsed = self._eit_flashElapsed + elapsed
-        local t = self._eit_flashElapsed / 0.3
-        if t >= 1 then
-            self:SetAlpha(1)
-            self._eit_flashElapsed = nil
-            return
-        end
-        -- triangle wave: alpha 1 → 0.4 → 1 over the 0.3 s window
-        self:SetAlpha(1 - 0.6 * (1 - math.abs(2 * t - 1)))
-    end)
 
     barPool[index] = f
     return f
@@ -521,7 +509,6 @@ function RebuildDisplay()
         entries[#entries + 1] = { unit = unit, info = info }
     end
     SortEntries(entries)
-    displayedOrder = BuildOrderKey(entries)
 
     local count = #entries
     local totalH = count * p.barHeight + (count > 0 and (count - 1) * p.barSpacing or 0)
@@ -531,9 +518,6 @@ function RebuildDisplay()
         local bar = GetBarFrame(i, containerFrame)
         -- Attach bar reference so UpdateBarCDText can find it without re-sorting
         entry.info.barFrame = bar
-        -- Expose unit token + info on the bar frame for the announce click handler
-        bar._eit_unit = entry.unit
-        bar._eit_info = entry.info
 
         bar:ClearAllPoints()
         if p.growUpward then
@@ -582,14 +566,35 @@ local function RebuildPetGuidMap()
     end
 end
 
+-------------------------------------------------------------------------------
+--  Carry over live cooldown state (cdStart/cdDuration/kickState/barFrame)
+--  from the previous roster snapshot onto a freshly-built entry, but ONLY
+--  when the same unit token still holds the same player (guid match) -- a
+--  roster event unrelated to this unit (someone else joining/leaving) must
+--  never wipe a running interrupt cooldown, but a genuine occupant change on
+--  that slot (old member left, someone else took "party2") must never
+--  inherit the departed player's cooldown either.
+-------------------------------------------------------------------------------
+local function CarryOver(previous, unit, entry)
+    local prev = previous[unit]
+    if prev and prev.guid and prev.guid == entry.guid then
+        entry.cdStart, entry.cdDuration = prev.cdStart, prev.cdDuration
+        entry.kickState, entry.barFrame  = prev.kickState, prev.barFrame
+        if entry.cdStart and entry.cdDuration then
+            ScheduleExpiry(unit, entry)
+        end
+    end
+    return entry
+end
+
 local function RebuildRoster()
     if not db or not db.profile then return end
     local p      = db.profile
     local inRaid  = IsInRaid()
     local inParty = IsInGroup()
 
+    local previous = trackedPlayers
     trackedPlayers = {}
-    if ns.ClearAnnounceLock then ns.ClearAnnounceLock() end
 
     if inRaid and p.showInRaid then
         local n = GetNumGroupMembers()
@@ -598,12 +603,12 @@ local function RebuildRoster()
             if UnitExists(unit) then
                 local name = UnitName(unit) or unit
                 local _, classToken = UnitClass(unit)
-                trackedPlayers[unit] = {
+                trackedPlayers[unit] = CarryOver(previous, unit, {
                     name = name, classToken = classToken,
                     guid = UnitGUID(unit), specID = nil,
                     data = ns.GetInterruptData(classToken, nil),
-                }
-                EnqueueInspect(unit)
+                })
+                inspect:Enqueue(unit)
             end
         end
     elseif inParty and p.showInParty then
@@ -613,12 +618,12 @@ local function RebuildRoster()
             if UnitExists(unit) then
                 local name = UnitName(unit) or unit
                 local _, classToken = UnitClass(unit)
-                trackedPlayers[unit] = {
+                trackedPlayers[unit] = CarryOver(previous, unit, {
                     name = name, classToken = classToken,
                     guid = UnitGUID(unit), specID = nil,
                     data = ns.GetInterruptData(classToken, nil),
-                }
-                EnqueueInspect(unit)
+                })
+                inspect:Enqueue(unit)
             end
         end
     end
@@ -629,20 +634,20 @@ local function RebuildRoster()
         local _, classToken = UnitClass("player")
         local specIndex     = GetSpecialization()
         local specID        = specIndex and GetSpecializationInfo(specIndex) or nil
-        trackedPlayers["player"] = {
+        trackedPlayers["player"] = CarryOver(previous, "player", {
             name = UnitName("player") or "Player",
             classToken = classToken,
             guid = UnitGUID("player"),
             specID = specID,
             data = ns.GetInterruptData(classToken, specID),
-        }
+        })
     end
 
     -- Build pet-GUID → owner-unit map for pet-source interrupts (Warlock Demo/Felhunter)
     RebuildPetGuidMap()
 
     RebuildDisplay()
-    C_Timer.After(0.2, ProcessInspectQueue)
+    C_Timer.After(0.2, function() inspect:Process() end)
 end
 
 -------------------------------------------------------------------------------
@@ -722,6 +727,11 @@ local function ApplyInterruptCast(unit, info)
     info.cdStart    = GetTime()
     info.cdDuration = GetEffectiveCD(unit, info.data)
 
+    -- A new cast can reorder the bars immediately (this unit's remaining time
+    -- just jumped); don't wait for the next tick or the expiry timer.
+    if info.cdDuration then ScheduleExpiry(unit, info) end
+    RebuildDisplay()
+
     -- Failed-kick correlation window (0.05 s lets UNIT_SPELLCAST_INTERRUPTED
     -- arrive first).
     local p = db and db.profile
@@ -783,7 +793,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
             end
         end
         RebuildDisplay()
-        C_Timer.After(0.1, ProcessInspectQueue)
+        C_Timer.After(0.1, function() inspect:Process() end)
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
         local unit = ...
@@ -814,7 +824,6 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         local info = trackedPlayers[unit]
         if info and info.data and info.data ~= false and MatchesInterrupt(spellID, info.data) then
             info.kickState = "pending"
-            pendingKicks[info.name] = { time = GetTime() }
         end
 
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then

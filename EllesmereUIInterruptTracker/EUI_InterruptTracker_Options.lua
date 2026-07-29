@@ -214,15 +214,6 @@ initFrame:SetScript("OnEvent", function(self)
             "Bars are ordered by remaining cooldown. \"Ready first\" puts usable interrupts at the top and the longest cooldown at the bottom; the reverse flips it.")
         y = y - h
 
-        -- Announce Channel dropdown
-        _, h = W:Dropdown(parent, "Announce Channel", y,
-            { PARTY = "Party", SAY = "Say" },
-            function() return DB() and DB().announceChannel or "PARTY" end,
-            function(v) local p = DB(); if p then p.announceChannel = v end; Refresh() end,
-            { "PARTY", "SAY" },
-            "Channel used when left-clicking a bar to announce interrupt status.")
-        y = y - h
-
         ---------------------------------------------------------------------------
         --  Kick Rotation editor
         ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ EUI_MacroFactory.lua
 EUI_UnlockMode.lua
 EllesmereUI_Glows.lua
 EllesmereUI_SpellMatch.lua
+EllesmereUI_InspectThrottle.lua
 EllesmereUI_Range.lua
 EllesmereUI_AuraKit.lua
 EllesmereUI_FirstInstall.lua
