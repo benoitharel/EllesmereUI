@@ -6,10 +6,6 @@
 --      delve shares the same 1-11 tier picker at its entrance, so nothing in
 --      the API says one zone runs quicker than another; this is community
 --      knowledge only, sourced from farming-route tier lists (see below).
---    * isBoss -- marks the season's Nemesis/"boss" delve (the one built from
---      that season's delve bosses, e.g. Midnight S1's Torment's Rise, or
---      Profondeurs de Chute-Venin/Venomfall Deeps in S2). Shown with a skull
---      icon in the popup.
 --    * storyAchievementID -- the numeric ID of the delve's "<Name> Stories"
 --      achievement, used to show whether its companion narrative has been
 --      completed. There is no API to look this ID up by delve name, so it
@@ -17,55 +13,63 @@
 --      Wowhead's achievement pages). Left nil for now -- fill in as you
 --      confirm them in game.
 --
---  Keyed by the EXACT delve name string the WoW API reports (accents,
---  apostrophes and punctuation must match). Use `/euidelves dump` in game to
---  print the exact names this season's delves report (and, for the boss
---  delve, whether it was actually detected live), then adjust the keys here
---  if anything doesn't match.
+--  Keyed by the EXACT delve name string the WoW API reports, which is
+--  LOCALE-DEPENDENT (French client -> French names, no English fallback).
+--  Accents and the apostrophe character must match exactly -- a mismatch
+--  fails silently (delve still lists, just without a difficulty tag), so
+--  run `/euidelves dump` in game and diff the printed names against the
+--  keys below if something still shows "?".
 --
 --  Delves are reshuffled every season -- this table needs a refresh each
---  time the roster changes. Entries left nil degrade gracefully: the delve
---  still lists, just without a difficulty tag or story checkmark.
+--  time the roster changes.
 -------------------------------------------------------------------------------
 local EUI = EllesmereUI
 
 -------------------------------------------------------------------------------
---  Midnight Season 1 (current as of 2026-08-14; Season 2 opens 2026-08-18
---  and adds The Ring of Glory, Gnarldor Isle and the Venomfall Deeps Nemesis
---  delve -- this table will need updating then).
+--  Midnight Season 2 (live as of this writing -- Season 2 added The Ring of
+--  Glory, Gnarldor Isle and the Venomfall Deeps Nemesis delve on top of the
+--  10 Season 1 delves, which stayed in rotation).
 --
---  Difficulty/speed tags below come from community farming-route tier lists
---  (e.g. aoeah's Midnight Delve Tier List). They reflect each delve's
---  typical/fastest-known story variant, not every variant equally -- the
---  story column in the popup shows which variant is active today so you can
---  cross-check.
+--  Difficulty/speed tags for the 10 Season 1 delves come from community
+--  farming-route tier lists (e.g. aoeah's Midnight Delve Tier List) and
+--  reflect each delve's typical/fastest-known story variant, not every
+--  variant equally -- the story column in the popup shows which variant is
+--  active today so you can cross-check. The Ring of Glory / Gnarldor Isle
+--  are brand new this season; no tier-list data exists yet.
 -------------------------------------------------------------------------------
 EUI.DELVES_DATA = EUI.DELVES_DATA or {
     -- Fast (S/A tier: ~1:10-1:15 clears on their quick variant)
-    ["The Darkway"]          = { difficulty = "fast" },
-    ["Collegiate Calamity"]  = { difficulty = "fast" },
-    ["The Gulf of Memory"]   = { difficulty = "fast" },
+    ["Sombrevoie"]            = { difficulty = "fast" }, -- The Darkway
+    ["Calamité Universitaire"] = { difficulty = "fast" }, -- Collegiate Calamity
+    ["Le golfe du Souvenir"]  = { difficulty = "fast" },  -- The Gulf of Memory
 
     -- Medium (B tier)
-    ["Sunkiller Sanctum"]    = { difficulty = "medium" },
-    ["Parhelion Plaza"]      = { difficulty = "medium" },
-    ["Twilight Crypts"]      = { difficulty = "medium" },
+    ["Sanctum des Tue-Soleil"] = { difficulty = "medium" }, -- Sunkiller Sanctum
+    ["Place Parhélion"]       = { difficulty = "medium" },  -- Parhelion Plaza
+    ["Cryptes du Crépuscule"] = { difficulty = "medium" },  -- Twilight Crypts
 
     -- Slow (C tier)
-    ["Atal'Aman"]            = { difficulty = "slow" },
-    ["Shadowguard Point"]    = { difficulty = "slow" },
-    ["The Grudge Pit"]       = { difficulty = "slow" },
-    ["The Shadow Enclave"]   = { difficulty = "slow" },
+    ["Atal'Aman"]             = { difficulty = "slow" },
+    ["Halte de l'Ombre-Garde"] = { difficulty = "slow" }, -- Shadowguard Point
+    ["La fosse de la Rancœur"] = { difficulty = "slow" }, -- The Grudge Pit
+    ["L'enclave Ombreuse"]    = { difficulty = "slow" },  -- The Shadow Enclave
 
-    -- Season 1 Nemesis/boss delve (Voidstorm). Only unlocks after clearing a
-    -- Tier 7 delve with 1 life remaining -- no difficulty/speed tag since
-    -- it's a fixed boss gauntlet, not a farming route.
-    ["Torment's Rise"]       = { isBoss = true },
+    -- New in Season 2 -- no community speed data yet.
+    ["Arène de la Gloire"]    = {}, -- The Ring of Glory
+    ["Île Torsadine"]         = {}, -- Gnarldor Isle
 }
 
--- Known boss/Nemesis delve names for the current season. CollectDelves()
--- always lists these even if the live API scan doesn't surface them (e.g.
--- while still locked), so the boss delve is never silently missing.
-EUI.DELVES_ALWAYS_SHOW = EUI.DELVES_ALWAYS_SHOW or {
-    "Torment's Rise",
+-------------------------------------------------------------------------------
+--  Nemesis/boss delves to hide from the list entirely (irrelevant to
+--  "fastest delve for the weekly vault"). Exact names go in DELVES_EXCLUDE;
+--  DELVES_EXCLUDE_PATTERNS holds plain Lua patterns for names not yet
+--  confirmed via `/euidelves dump` (the in-game popup showed this one
+--  truncated as "Profondeurs de Chute-...").
+-------------------------------------------------------------------------------
+EUI.DELVES_EXCLUDE = EUI.DELVES_EXCLUDE or {
+    -- ["Torment's Rise (French name TBD)"] = true,
+}
+
+EUI.DELVES_EXCLUDE_PATTERNS = EUI.DELVES_EXCLUDE_PATTERNS or {
+    "^Profondeurs de Chute", -- Venomfall Deeps, Season 2 Nemesis delve
 }
