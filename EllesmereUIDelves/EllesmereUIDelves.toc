@@ -1,0 +1,15 @@
+## Interface: 120000, 120001, 120005, 120007, 120100
+## Title: |cff0cd29fEllesmereUI|r Delves
+## Category: |cff0cd29fEllesmere|rUI
+## Group: EllesmereUI
+## Notes: Overview of this season's Delves: bountiful status, story progress and vault-friendly picks
+## Author: Ellesmere
+## Version: 8.7.3
+## Dependencies: EllesmereUI
+## IconTexture: Interface\AddOns\EllesmereUI\media\eg-logo.tga
+
+# Manually curated per-season data (difficulty/duration tags, story achievement IDs)
+EllesmereUIDelves_Data.lua
+
+# Main Lua
+EllesmereUIDelves.lua
