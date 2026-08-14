@@ -18,7 +18,10 @@
 --  Accents and the apostrophe character must match exactly -- a mismatch
 --  fails silently (delve still lists, just without a difficulty tag), so
 --  run `/euidelves dump` in game and diff the printed names against the
---  keys below if something still shows "?".
+--  keys below if something still shows "?". Confirmed live: the French
+--  client uses the typographic apostrophe (’, U+2019), not a plain ' --
+--  a first pass with plain apostrophes silently missed every entry that
+--  had one (Atal'Aman, l'Ombre-Garde, L'enclave).
 --
 --  Delves are reshuffled every season -- this table needs a refresh each
 --  time the roster changes.
@@ -49,10 +52,10 @@ EUI.DELVES_DATA = EUI.DELVES_DATA or {
     ["Cryptes du Crépuscule"] = { difficulty = "medium" },  -- Twilight Crypts
 
     -- Slow (C tier)
-    ["Atal'Aman"]             = { difficulty = "slow" },
-    ["Halte de l'Ombre-Garde"] = { difficulty = "slow" }, -- Shadowguard Point
+    ["Atal’Aman"]             = { difficulty = "slow" }, -- typographic apostrophe (U+2019), not '
+    ["Halte de l’Ombre-Garde"] = { difficulty = "slow" }, -- Shadowguard Point
     ["La fosse de la Rancœur"] = { difficulty = "slow" }, -- The Grudge Pit
-    ["L'enclave Ombreuse"]    = { difficulty = "slow" },  -- The Shadow Enclave
+    ["L’enclave Ombreuse"]    = { difficulty = "slow" },  -- The Shadow Enclave
 
     -- New in Season 2 -- no community speed data yet.
     ["Arène de la Gloire"]    = {}, -- The Ring of Glory
