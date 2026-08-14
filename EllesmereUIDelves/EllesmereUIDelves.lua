@@ -47,43 +47,152 @@ local function CollectZoneMapIDs()
     return zones
 end
 
--- One entry per delve area-POI found under the player's current continent:
--- { name, bountiful, storyVariant, zoneMapID, difficulty, storyDone }
+-------------------------------------------------------------------------------
+--  Story-variant text
+--
+--  The active story name is NOT carried in AreaPOIInfo.description for
+--  delves (that field is nil for them) -- it's rendered through the POI's
+--  tooltipWidgetSet, the same mechanism Blizzard's own map pin tooltip uses
+--  (see AreaPoiUtil.TryShowTooltip -> GameTooltip_AddWidgetSet in Blizzard's
+--  FrameXML). Rather than hijack the real GameTooltip to read rendered lines
+--  back out, we read the widget data directly: C_UIWidgetManager.
+--  GetAllWidgetsBySetID(widgetSetID) lists the widgets in the set, and each
+--  widget type has its own accessor (GetIconAndTextWidgetVisualizationInfo,
+--  GetTextWithStateWidgetVisualizationInfo, etc.) whose result carries a
+--  plain string field. We try every text-bearing widget type Blizzard
+--  exposes and return the first non-empty string found.
+--
+--  Unverified against a live client (no WoW install available while writing
+--  this) -- if this comes back empty in game, `/euidelves dump` also prints
+--  the raw tooltipWidgetSet id so we can see what widget type is actually in
+--  play and adjust the table below.
+-------------------------------------------------------------------------------
+local WIDGET_TEXT_GETTERS = {
+    [0]  = "GetIconAndTextWidgetVisualizationInfo",        -- IconAndText
+    [4]  = "GetIconTextAndBackgroundWidgetVisualizationInfo", -- IconTextAndBackground
+    [5]  = "GetDoubleIconAndTextWidgetVisualizationInfo",  -- DoubleIconAndText
+    [8]  = "GetTextWithStateWidgetVisualizationInfo",      -- TextWithState
+    [12] = "GetTextureAndTextVisualizationInfo",           -- TextureAndText
+    [25] = "GetTextWithSubtextWidgetVisualizationInfo",    -- TextWithSubtext
+    [29] = "GetScenarioHeaderDelvesWidgetVisualizationInfo", -- ScenarioHeaderDelves
+}
+local WIDGET_TEXT_FIELDS = { "headerText", "text", "tierText", "subText" }
+
+local function ExtractWidgetSetText(widgetSetID)
+    if not widgetSetID or not (C_UIWidgetManager and C_UIWidgetManager.GetAllWidgetsBySetID) then
+        return nil
+    end
+    local widgets = C_UIWidgetManager.GetAllWidgetsBySetID(widgetSetID)
+    if not widgets then return nil end
+    for _, w in ipairs(widgets) do
+        local getterName = WIDGET_TEXT_GETTERS[w.widgetType]
+        local getter = getterName and C_UIWidgetManager[getterName]
+        if getter then
+            local ok, info = pcall(getter, w.widgetID)
+            if ok and info then
+                for _, field in ipairs(WIDGET_TEXT_FIELDS) do
+                    local text = info[field]
+                    if type(text) == "string" and text ~= "" then
+                        return text
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function StoryVariantFor(info)
+    if info.description and info.description ~= "" then return info.description end
+    return ExtractWidgetSetText(info.tooltipWidgetSet)
+end
+
+local function StoryDoneFor(data)
+    if not (data and data.storyAchievementID) then return nil end
+    local _, _, _, completed = GetAchievementInfo(data.storyAchievementID)
+    return completed and true or false
+end
+
+local function MakeEntry(name, zoneMapID, info)
+    local data = EUI.DELVES_DATA and EUI.DELVES_DATA[name]
+    return {
+        name = name,
+        bountiful = info and info.shouldGlow and true or false,
+        storyVariant = info and StoryVariantFor(info) or nil,
+        tooltipWidgetSet = info and info.tooltipWidgetSet or nil,
+        zoneMapID = zoneMapID,
+        difficulty = data and data.difficulty,
+        storyDone = StoryDoneFor(data),
+        isBoss = data and data.isBoss or false,
+        notDetected = info == nil,
+    }
+end
+
+-- One entry per delve found under the player's current continent, plus any
+-- season-specific boss/nemesis delve listed in EUI.DELVES_ALWAYS_SHOW that
+-- the live scan didn't turn up (e.g. because it's still locked -- Nemesis
+-- delves only unlock after clearing a Tier 7 delve with a life remaining,
+-- and it's untested whether a locked one still reports through the API).
 local function CollectDelves()
     local results = {}
-    if not (C_AreaPoiInfo and C_AreaPoiInfo.GetDelvesForMap and C_AreaPoiInfo.GetAreaPOIInfo) then
-        return results
+    local seen = {}
+
+    if C_AreaPoiInfo and C_AreaPoiInfo.GetAreaPOIInfo then
+        local wanted = EUI.DELVES_ALWAYS_SHOW
+        local wantedSet
+        if wanted and #wanted > 0 then
+            wantedSet = {}
+            for _, n in ipairs(wanted) do wantedSet[n] = true end
+        end
+
+        for _, zoneMapID in ipairs(CollectZoneMapIDs()) do
+            -- Standard rotation: delves flagged as such for this map.
+            if C_AreaPoiInfo.GetDelvesForMap then
+                local poiIDs = C_AreaPoiInfo.GetDelvesForMap(zoneMapID)
+                if poiIDs then
+                    for _, poiID in ipairs(poiIDs) do
+                        local info = C_AreaPoiInfo.GetAreaPOIInfo(zoneMapID, poiID)
+                        if info and info.name and not seen[info.name] then
+                            seen[info.name] = true
+                            results[#results + 1] = MakeEntry(info.name, zoneMapID, info)
+                        end
+                    end
+                end
+            end
+
+            -- Nemesis/boss delves aren't guaranteed to show up in
+            -- GetDelvesForMap (untested), so also scan the zone's full POI
+            -- list for a name match against the known boss-delve roster.
+            if wantedSet and C_AreaPoiInfo.GetAreaPOIForMap then
+                local poiIDs = C_AreaPoiInfo.GetAreaPOIForMap(zoneMapID)
+                if poiIDs then
+                    for _, poiID in ipairs(poiIDs) do
+                        local info = C_AreaPoiInfo.GetAreaPOIInfo(zoneMapID, poiID)
+                        if info and info.name and wantedSet[info.name] and not seen[info.name] then
+                            seen[info.name] = true
+                            results[#results + 1] = MakeEntry(info.name, zoneMapID, info)
+                        end
+                    end
+                end
+            end
+        end
     end
 
-    local seen = {}
-    for _, zoneMapID in ipairs(CollectZoneMapIDs()) do
-        local poiIDs = C_AreaPoiInfo.GetDelvesForMap(zoneMapID)
-        if poiIDs then
-            for _, poiID in ipairs(poiIDs) do
-                local info = C_AreaPoiInfo.GetAreaPOIInfo(zoneMapID, poiID)
-                if info and info.name and not seen[info.name] then
-                    seen[info.name] = true
-                    local data = EUI.DELVES_DATA and EUI.DELVES_DATA[info.name]
-                    local storyDone
-                    if data and data.storyAchievementID then
-                        local _, _, _, completed = GetAchievementInfo(data.storyAchievementID)
-                        storyDone = completed and true or false
-                    end
-                    results[#results + 1] = {
-                        name = info.name,
-                        bountiful = info.shouldGlow and true or false,
-                        storyVariant = info.description,
-                        zoneMapID = zoneMapID,
-                        difficulty = data and data.difficulty,
-                        storyDone = storyDone,
-                    }
-                end
+    -- Static fallback: a known boss delve neither scan found still gets
+    -- listed, just flagged as not live-detected, so it's never silently
+    -- missing from the table.
+    if EUI.DELVES_ALWAYS_SHOW then
+        for _, name in ipairs(EUI.DELVES_ALWAYS_SHOW) do
+            if not seen[name] then
+                seen[name] = true
+                results[#results + 1] = MakeEntry(name, nil, nil)
             end
         end
     end
 
     table.sort(results, function(a, b)
         if a.bountiful ~= b.bountiful then return a.bountiful end
+        if a.isBoss ~= b.isBoss then return a.isBoss end
         return a.name < b.name
     end)
     return results
@@ -253,8 +362,17 @@ local function AcquireRow(i)
     r._bountyFS = MakeLabel(r, 11, "OUTLINE", 0.98, 0.82, 0.16, 1)
     r._bountyFS:SetPoint("LEFT", 2, 0); r._bountyFS:SetWidth(14); r._bountyFS:SetJustifyH("LEFT")
 
+    -- Boss/Nemesis delve marker (the season's delve-of-bosses, e.g. Torment's
+    -- Rise / Venomfall Deeps) -- reuses the classic skull texture rather than
+    -- a custom icon asset.
+    r._bossIcon = r:CreateTexture(nil, "ARTWORK")
+    r._bossIcon:SetSize(12, 12)
+    r._bossIcon:SetPoint("LEFT", r._bountyFS, "RIGHT", 1, 0)
+    r._bossIcon:SetTexture("Interface\\TargetingFrame\\UI-TargetingFrame-Skull")
+    r._bossIcon:Hide()
+
     r._nameFS = MakeLabel(r, 11, nil, 1, 1, 1, 0.9)
-    r._nameFS:SetPoint("LEFT", r._bountyFS, "RIGHT", 2, 0); r._nameFS:SetWidth(150); r._nameFS:SetJustifyH("LEFT")
+    r._nameFS:SetPoint("LEFT", r._bossIcon, "RIGHT", 2, 0); r._nameFS:SetWidth(138); r._nameFS:SetJustifyH("LEFT")
     r._nameFS:SetWordWrap(false)
 
     r._storyVariantFS = MakeLabel(r, 10, nil, 0.6, 0.6, 0.6, 1)
@@ -280,9 +398,15 @@ end
 
 local function PopulateRow(r, e)
     r._bountyFS:SetText(e.bountiful and "\226\152\133" or "") -- star glyph
+    r._bossIcon:SetShown(e.isBoss and true or false)
     r._nameFS:SetText(e.name)
-    r._nameFS:SetTextColor(e.bountiful and 0.98 or 1, e.bountiful and 0.82 or 1, e.bountiful and 0.16 or 1, 1)
-    r._storyVariantFS:SetText(e.storyVariant or "")
+    local alpha = e.notDetected and 0.5 or 1
+    r._nameFS:SetTextColor(e.bountiful and 0.98 or 1, e.bountiful and 0.82 or 1, e.bountiful and 0.16 or 1, alpha)
+    if e.notDetected then
+        r._storyVariantFS:SetText("(not detected live -- locked?)")
+    else
+        r._storyVariantFS:SetText(e.storyVariant or "")
+    end
 
     if e.difficulty and DIFFICULTY_LABEL[e.difficulty] then
         local c = DIFFICULTY_COLOR[e.difficulty]
@@ -324,7 +448,7 @@ ShowDelvesPopup = function()
     local curY = 0
     if #entries == 0 then
         local r = AcquireRow(1)
-        r._bountyFS:SetText(""); r._storyVariantFS:SetText(""); r._difficultyFS:SetText(""); r._storyDoneFS:SetText("")
+        r._bountyFS:SetText(""); r._bossIcon:Hide(); r._storyVariantFS:SetText(""); r._difficultyFS:SetText(""); r._storyDoneFS:SetText("")
         r._nameFS:SetText("No delves found on this continent")
         r._nameFS:SetWidth(contentW)
         r._nameFS:SetTextColor(0.5, 0.5, 0.5, 0.7)
@@ -337,7 +461,7 @@ ShowDelvesPopup = function()
         for idx, e in ipairs(entries) do
             local r = AcquireRow(idx)
             PopulateRow(r, e)
-            r._nameFS:SetWidth(150)
+            r._nameFS:SetWidth(138)
             r:ClearAllPoints()
             r:SetPoint("TOPLEFT", body, "TOPLEFT", 0, curY)
             r:SetPoint("TOPRIGHT", body, "TOPRIGHT", 0, curY)
@@ -371,7 +495,9 @@ SlashCmdList["EUIDELVES"] = function(msg)
         end
         print("|cff0cd29fEllesmereUI Delves:|r found " .. #entries .. " delve(s) this session:")
         for _, e in ipairs(entries) do
-            print(("  [%s] bountiful=%s story=%s"):format(e.name, tostring(e.bountiful), tostring(e.storyVariant)))
+            print(("  [%s] bountiful=%s boss=%s live=%s story=%s widgetSet=%s"):format(
+                e.name, tostring(e.bountiful), tostring(e.isBoss), tostring(not e.notDetected),
+                tostring(e.storyVariant), tostring(e.tooltipWidgetSet)))
         end
         return
     end
