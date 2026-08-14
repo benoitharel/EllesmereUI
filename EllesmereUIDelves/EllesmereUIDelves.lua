@@ -342,8 +342,16 @@ local function AcquireRow(i)
     return r
 end
 
+-- Plain Unicode glyphs (star, check mark) render as a broken-glyph "missing
+-- character" icon in WoW's default UI font -- confirmed live: the check mark
+-- showed as a green question-mark bubble instead of a tick. Use Blizzard's
+-- own icon textures via font-string texture markup instead; those are
+-- guaranteed present.
+local ICON_BOUNTIFUL = "|TInterface\\COMMON\\FavoritesIcon:12|t"
+local ICON_STORY_DONE = "|TInterface\\RaidFrame\\ReadyCheck-Ready:14|t"
+
 local function PopulateRow(r, e)
-    r._bountyFS:SetText(e.bountiful and "\226\152\133" or "") -- star glyph
+    r._bountyFS:SetText(e.bountiful and ICON_BOUNTIFUL or "")
     r._nameFS:SetText(e.name)
     r._nameFS:SetTextColor(e.bountiful and 0.98 or 1, e.bountiful and 0.82 or 1, e.bountiful and 0.16 or 1, 1)
     r._storyVariantFS:SetText(e.storyVariant or "")
@@ -358,8 +366,8 @@ local function PopulateRow(r, e)
     end
 
     if e.storyDone == true then
-        r._storyDoneFS:SetText("\226\156\147") -- check mark
-        r._storyDoneFS:SetTextColor(0.12, 1, 0, 1)
+        r._storyDoneFS:SetText(ICON_STORY_DONE)
+        r._storyDoneFS:SetTextColor(1, 1, 1, 1)
     elseif e.storyDone == false then
         r._storyDoneFS:SetText("\226\128\148") -- em dash
         r._storyDoneFS:SetTextColor(0.6, 0.6, 0.6, 0.7)
