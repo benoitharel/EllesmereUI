@@ -9,9 +9,11 @@
 --    * storyAchievementID -- the numeric ID of the delve's "<Name> Stories"
 --      achievement, used to show whether its companion narrative has been
 --      completed. There is no API to look this ID up by delve name, so it
---      has to be entered by hand (e.g. via the in-game achievement UI, or
---      Wowhead's achievement pages). Left nil for now -- fill in as you
---      confirm them in game.
+--      has to be entered by hand. Filled in below from Wowhead (achievement
+--      IDs are numeric and locale-independent, so unlike the table keys
+--      these don't need re-checking per client language) -- worth a
+--      sanity-check against the in-game achievement UI since it's still
+--      unverified against a live client.
 --
 --  Keyed by the EXACT delve name string the WoW API reports, which is
 --  LOCALE-DEPENDENT (French client -> French names, no English fallback).
@@ -42,24 +44,25 @@ local EUI = EllesmereUI
 -------------------------------------------------------------------------------
 EUI.DELVES_DATA = EUI.DELVES_DATA or {
     -- Fast (S/A tier: ~1:10-1:15 clears on their quick variant)
-    ["Sombrevoie"]            = { difficulty = "fast" }, -- The Darkway
-    ["Calamité Universitaire"] = { difficulty = "fast" }, -- Collegiate Calamity
-    ["Le golfe du Souvenir"]  = { difficulty = "fast" },  -- The Gulf of Memory
+    ["Sombrevoie"]            = { difficulty = "fast", storyAchievementID = 61728 }, -- The Darkway
+    ["Calamité Universitaire"] = { difficulty = "fast", storyAchievementID = 61726 }, -- Collegiate Calamity
+    ["Le golfe du Souvenir"]  = { difficulty = "fast", storyAchievementID = 61731 },  -- The Gulf of Memory
 
     -- Medium (B tier)
-    ["Sanctum des Tue-Soleil"] = { difficulty = "medium" }, -- Sunkiller Sanctum
-    ["Place Parhélion"]       = { difficulty = "medium" },  -- Parhelion Plaza
-    ["Cryptes du Crépuscule"] = { difficulty = "medium" },  -- Twilight Crypts
+    ["Sanctum des Tue-Soleil"] = { difficulty = "medium", storyAchievementID = 61732 }, -- Sunkiller Sanctum
+    ["Place Parhélion"]       = { difficulty = "medium", storyAchievementID = 61725 },  -- Parhelion Plaza
+    ["Cryptes du Crépuscule"] = { difficulty = "medium", storyAchievementID = 61730 },  -- Twilight Crypts
 
     -- Slow (C tier)
-    ["Atal’Aman"]             = { difficulty = "slow" }, -- typographic apostrophe (U+2019), not '
-    ["Halte de l’Ombre-Garde"] = { difficulty = "slow" }, -- Shadowguard Point
-    ["La fosse de la Rancœur"] = { difficulty = "slow" }, -- The Grudge Pit
-    ["L’enclave Ombreuse"]    = { difficulty = "slow" },  -- The Shadow Enclave
+    ["Atal’Aman"]             = { difficulty = "slow", storyAchievementID = 61729 }, -- typographic apostrophe (U+2019), not '
+    ["Halte de l’Ombre-Garde"] = { difficulty = "slow", storyAchievementID = 61733 }, -- Shadowguard Point
+    ["La fosse de la Rancœur"] = { difficulty = "slow", storyAchievementID = 61724 }, -- The Grudge Pit
+    ["L’enclave Ombreuse"]    = { difficulty = "slow", storyAchievementID = 61727 },  -- The Shadow Enclave
 
-    -- New in Season 2 -- no community speed data yet.
-    ["Arène de la Gloire"]    = {}, -- The Ring of Glory
-    ["Île Torsadine"]         = {}, -- Gnarldor Isle
+    -- New in Season 2 -- no community speed data yet, but the story
+    -- achievement already exists (added alongside the delve in patch 12.1.0).
+    ["Arène de la Gloire"]    = { storyAchievementID = 63436 }, -- The Ring of Glory
+    ["Île Torsadine"]         = { storyAchievementID = 63437 }, -- Gnarldor Isle
 }
 
 -------------------------------------------------------------------------------
