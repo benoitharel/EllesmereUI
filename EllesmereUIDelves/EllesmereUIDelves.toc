@@ -6,6 +6,7 @@
 ## Author: Ellesmere
 ## Version: 8.7.3
 ## Dependencies: EllesmereUI
+## SavedVariables: EllesmereUIDelvesDB
 ## IconTexture: Interface\AddOns\EllesmereUI\media\eg-logo.tga
 
 # Manually curated per-season data (difficulty/duration tags, story achievement IDs)

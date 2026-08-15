@@ -427,6 +427,143 @@ ShowDelvesPopup = function()
     p:Show()
 end
 
+local function ToggleDelvesPopup()
+    if popup and popup:IsShown() then
+        popup:Hide()
+    else
+        ShowDelvesPopup()
+    end
+end
+
+-------------------------------------------------------------------------------
+--  Minimap button
+--
+--  Same hand-rolled, no-library shape as EllesmereUI's own minimap button
+--  (EllesmereUI.lua, "Native Minimap Button" section) -- there's no shared
+--  per-module registration API to hook into instead, so this mirrors it:
+--  black background + eg-logo.tga icon + tracking-border overlay, saved
+--  drag angle, tooltip on hover.
+-------------------------------------------------------------------------------
+do
+    local ICON_PATH = "Interface\\AddOns\\EllesmereUI\\media\\eg-logo.tga"
+    local BUTTON_SIZE = 32
+    local btn
+    local currentAngle
+
+    local function GetAngle()
+        if currentAngle then return currentAngle end
+        currentAngle = (EllesmereUIDelvesDB and EllesmereUIDelvesDB.minimapButtonAngle) or 200
+        return currentAngle
+    end
+
+    local function SaveAngle()
+        if not EllesmereUIDelvesDB then EllesmereUIDelvesDB = {} end
+        EllesmereUIDelvesDB.minimapButtonAngle = currentAngle
+    end
+
+    local function UpdatePosition()
+        if not btn then return end
+        local angle = math.rad(GetAngle())
+        local mw, mh = Minimap:GetWidth(), Minimap:GetHeight()
+        local radius = (math.max(mw, mh) / 2) + 5
+        btn:ClearAllPoints()
+        btn:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
+    end
+
+    local function DragOnUpdate()
+        local mx, my = Minimap:GetCenter()
+        local cx, cy = GetCursorPosition()
+        local scale = Minimap:GetEffectiveScale()
+        cx, cy = cx / scale, cy / scale
+        currentAngle = math.deg(math.atan2(cy - my, cx - mx))
+        UpdatePosition()
+    end
+
+    local function CreateMinimapButton()
+        if btn then return btn end
+
+        btn = CreateFrame("Button", "EllesmereUIDelvesMinimapButton", Minimap)
+        btn:SetSize(BUTTON_SIZE, BUTTON_SIZE)
+        btn:SetFrameStrata("MEDIUM")
+        btn:SetFrameLevel(8)
+        btn:SetClampedToScreen(true)
+        btn:SetMovable(true)
+        btn:RegisterForClicks("AnyUp")
+        btn:RegisterForDrag("LeftButton")
+
+        local bg = btn:CreateTexture(nil, "BACKGROUND")
+        bg:SetSize(25, 25)
+        bg:SetPoint("CENTER", 0, 0)
+        bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+        bg:SetVertexColor(0, 0, 0, 1)
+
+        local icon = btn:CreateTexture(nil, "ARTWORK")
+        icon:SetSize(17, 17)
+        icon:SetPoint("CENTER", 0, 0)
+        icon:SetTexture(ICON_PATH)
+
+        local overlay = btn:CreateTexture(nil, "OVERLAY")
+        overlay:SetSize(53, 53)
+        overlay:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+        overlay:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+
+        btn:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+        local isDragging = false
+        btn:SetScript("OnClick", function(_, button)
+            if button == "LeftButton" then
+                ToggleDelvesPopup()
+            elseif button == "MiddleButton" then
+                if not EllesmereUIDelvesDB then EllesmereUIDelvesDB = {} end
+                EllesmereUIDelvesDB.showMinimapButton = false
+                btn:Hide()
+            end
+        end)
+
+        btn:SetScript("OnDragStart", function(self)
+            isDragging = true
+            self:LockHighlight()
+            self:SetScript("OnUpdate", DragOnUpdate)
+            GameTooltip:Hide()
+        end)
+
+        btn:SetScript("OnDragStop", function(self)
+            self:SetScript("OnUpdate", nil)
+            self:UnlockHighlight()
+            isDragging = false
+            SaveAngle()
+            UpdatePosition()
+        end)
+
+        btn:SetScript("OnEnter", function(self)
+            if isDragging then return end
+            GameTooltip:SetOwner(self, "ANCHOR_NONE")
+            GameTooltip:SetPoint("TOPRIGHT", self, "TOPLEFT", -2, 0)
+            GameTooltip:AddLine("|cff0cd29fEllesmereUI Delves|r")
+            GameTooltip:AddLine("|cff0cd29dLeft-click:|r |cffE0E0E0Toggle the Delves overview|r")
+            GameTooltip:AddLine("|cff0cd29dMiddle-click:|r |cffE0E0E0Hide this minimap button|r")
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+        UpdatePosition()
+        if EllesmereUIDelvesDB and EllesmereUIDelvesDB.showMinimapButton == false then
+            btn:Hide()
+        else
+            btn:Show()
+        end
+
+        return btn
+    end
+
+    local loader = CreateFrame("Frame")
+    loader:RegisterEvent("PLAYER_LOGIN")
+    loader:SetScript("OnEvent", function(self)
+        self:UnregisterEvent("PLAYER_LOGIN")
+        CreateMinimapButton()
+    end)
+end
+
 -------------------------------------------------------------------------------
 --  Slash commands
 --    /euidelves       -- open the overview popup
