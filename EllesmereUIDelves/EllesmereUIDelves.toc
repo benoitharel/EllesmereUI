@@ -4,7 +4,7 @@
 ## Group: EllesmereUI
 ## Notes: Overview of this season's Delves: bountiful status, story progress and vault-friendly picks
 ## Author: Ellesmere
-## Version: 8.7.3
+## Version: 8.9.1
 ## Dependencies: EllesmereUI
 ## SavedVariables: EllesmereUIDelvesDB
 ## IconTexture: Interface\AddOns\EllesmereUI\media\eg-logo.tga
