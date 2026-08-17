@@ -1,3 +1,4 @@
+if EUI_CLIENT_BLOCKED then return end -- pre-12.1 client failsafe (EllesmereUI_ClientGate.lua)
 -------------------------------------------------------------------------------
 --  EllesmereUIInterruptTracker.lua
 --
@@ -5,6 +6,7 @@
 --  live CD tracking, failed-kick state machine, combat fade.
 -------------------------------------------------------------------------------
 local ADDON_NAME, ns = ...
+EllesmereUI._ModuleNS[ADDON_NAME] = ns  -- LOD options files read this module ns via the registry
 if _G._EIT_Loaded then return end
 _G._EIT_Loaded = true
 local EIT = EllesmereUI.Lite.NewAddon(ADDON_NAME)

@@ -1,10 +1,13 @@
+if EUI_CLIENT_BLOCKED then return end -- pre-12.1 client failsafe (EllesmereUI_ClientGate.lua)
 -------------------------------------------------------------------------------
 --  EUI_InterruptTracker_Options.lua
 --
 --  Full options panel: layout controls, announce channel, kick rotation editor.
 --  Replaces the Phase 1 stub.
 -------------------------------------------------------------------------------
-local ADDON_NAME, ns = ...
+local ADDON_NAME = "EllesmereUIInterruptTracker"
+local ns = EllesmereUI._ModuleNS[ADDON_NAME]  -- module namespace (published by the module at its load)
+if not ns then return end  -- module disabled: no options page
 if _G._EIT_Options_Loaded then return end
 _G._EIT_Options_Loaded = true
 
@@ -348,3 +351,5 @@ initFrame:SetScript("OnEvent", function(self)
         end,
     })
 end)
+-- LoadOnDemand: this addon loads after PLAYER_LOGIN, so the event above will never fire; run the init now.
+if IsLoggedIn() then initFrame:GetScript("OnEvent")(initFrame) end
