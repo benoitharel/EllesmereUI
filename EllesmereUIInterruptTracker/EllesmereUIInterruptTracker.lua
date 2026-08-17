@@ -46,8 +46,13 @@ local trackedPlayers = {}
 -- { [petGUID] = ownerUnit }  — populated in RebuildRoster for pet-source interrupts
 local petGuidToUnit      = {}
 local petTokenToOwnerUnit = {}
--- { { time = T }, ... }  — enemy interrupted-cast timestamps for correlation
+-- { { time = T, guid = <interrupter GUID or nil>, consumed = bool }, ... }
+-- — enemy interrupted-cast signals for the failed-kick correlation window
 local recentInterrupts = {}
+-- Timestamp of the local player's last CONCLUSIVELY matched interrupt cast,
+-- and the window in which it outranks an unreadable party-member cast.
+local lastPlayerKickCast = 0
+local PLAYER_PRECEDENCE  = 0.06
 
 -------------------------------------------------------------------------------
 --  CD ticker (0.1s interval, only active when there are tracked players)
@@ -82,9 +87,61 @@ local function CheckInstanceState()
 end
 
 -------------------------------------------------------------------------------
---  Inspect throttle: 1 request per unit per 5 s
+--  Group spec intel over addon comms (LibSpecialization).
+--
+--  Inspect is not a usable source any more: NotifyInspect on group members is
+--  throttled into uselessness and GetInspectSpecialization answers for almost
+--  none of them, which is exactly why Party Cooldowns was retired. The other
+--  interrupt trackers made the same move -- BliZzi Party Tools deleted its
+--  inspect queue outright, Exwind resolves specs through LibSpecialization and
+--  LibOpenRaid.
+--
+--  The lib handles every bit of transmission itself (request on group join,
+--  broadcast on spec change, chat-lockdown deferral); registering the callback
+--  IS the integration, so its request functions are never called from here.
+--
+--  Keys match how the lib keys senders: "Name" same-realm, "Name-Realm"
+--  cross-realm. Entries self-heal (a rejoining player rebroadcasts) and growth
+--  is bounded (name -> number), so the cache needs no pruning. Same shape as
+--  EllesmereUIAuraBuffReminders' EABR._groupSpecs / EABR.GroupSpecFor.
 -------------------------------------------------------------------------------
-local inspect = EllesmereUI.NewInspectThrottle(5)
+local isSecret   = issecretvalue or function() return false end
+local groupSpecs = {}
+
+local function SpecKeyForUnit(unit)
+    local n, r = UnitNameUnmodified(unit)
+    if n == nil or isSecret(n) then return nil end
+    if r ~= nil and not isSecret(r) and r ~= "" then n = n .. "-" .. r end
+    return n
+end
+
+local function GroupSpecFor(unit)
+    local key = SpecKeyForUnit(unit)
+    return key and groupSpecs[key] or nil
+end
+
+-------------------------------------------------------------------------------
+--  Clean class token for a unit.
+--
+--  UnitClass can hand back a SECRET string for a group member, and a secret
+--  used as a table key THROWS on the index -- which would take the whole roster
+--  rebuild down with it (upstream hit the same thing in the raid frames, commit
+--  262a64ce). Both the interrupt database and the class-icon coords are keyed
+--  by class token, so the token has to be laundered before either lookup.
+--
+--  The comm spec is the better source once it arrives: GetSpecializationInfoByID
+--  returns a plain class file name that never went through a unit token. Fall
+--  back to UnitClass, and give up rather than index with a secret.
+-------------------------------------------------------------------------------
+local function CleanClassToken(unit, specID)
+    if specID and GetSpecializationInfoByID then
+        local classFile = select(6, GetSpecializationInfoByID(specID))
+        if classFile and not isSecret(classFile) then return classFile end
+    end
+    local _, token = UnitClass(unit)
+    if token == nil or isSecret(token) then return nil end
+    return token
+end
 
 -------------------------------------------------------------------------------
 --  Effective CD for a unit.
@@ -130,9 +187,74 @@ local function PurgeRecentInterrupts()
     end
 end
 
-local function HasRecentInterrupt()
+-------------------------------------------------------------------------------
+--  Resolve an interrupter GUID to the tracked unit it belongs to, following
+--  pet GUIDs back to their owner (a Felhunter's Spell Lock is the warlock's
+--  kick). Secret GUIDs resolve to nothing -- they are anonymous by design and
+--  must never be compared or used as a table key.
+-------------------------------------------------------------------------------
+local function InterrupterUnitFor(guid)
+    if guid == nil or isSecret(guid) then return nil end
+    for unit, info in pairs(trackedPlayers) do
+        if info.guid == guid then return unit end
+    end
+    return petGuidToUnit[guid]
+end
+
+-------------------------------------------------------------------------------
+--  Outcome of a just-committed kick, resolved against the interrupt signals
+--  collected in the correlation window. Each signal is consumed by at most one
+--  kick, so two members kicking within the same window can no longer both read
+--  as a success.
+--
+--  Returns "success", "fail", or nil when the signals are too ambiguous to
+--  call (the bar then shows no verdict rather than a wrong one).
+-------------------------------------------------------------------------------
+local CLUSTER_WINDOW = 0.02
+
+local function ClaimKickOutcome(unit)
     PurgeRecentInterrupts()
-    return #recentInterrupts > 0
+
+    -- Direct attribution: since 12.x the interrupt events carry the
+    -- interrupter's GUID whenever the client is willing to reveal it.
+    local anonymous = {}
+    for i = 1, #recentInterrupts do
+        local sig = recentInterrupts[i]
+        if not sig.consumed then
+            local owner = InterrupterUnitFor(sig.guid)
+            if owner == unit then
+                sig.consumed = true
+                return "success"
+            elseif owner == nil then
+                anonymous[#anonymous + 1] = sig
+            end
+            -- owner is some OTHER tracked unit: their signal, leave it alone.
+        end
+    end
+
+    if #anonymous == 0 then return "fail" end
+
+    -- An AoE stun interrupts several casts at once; those signals arrive in a
+    -- tight cluster and cannot be told apart from a real kick landing at the
+    -- same moment. Consume them and report no verdict rather than crediting a
+    -- whiffed kick as a success.
+    local freshest = anonymous[#anonymous]
+    for i = 1, #anonymous do
+        if anonymous[i].time > freshest.time then freshest = anonymous[i] end
+    end
+    local clustered = 0
+    for i = 1, #anonymous do
+        if math.abs(anonymous[i].time - freshest.time) <= CLUSTER_WINDOW then
+            clustered = clustered + 1
+        end
+    end
+    if clustered > 1 then
+        for i = 1, #anonymous do anonymous[i].consumed = true end
+        return nil
+    end
+
+    freshest.consumed = true
+    return "success"
 end
 
 -------------------------------------------------------------------------------
@@ -604,13 +726,13 @@ local function RebuildRoster()
             local unit = "raid" .. i
             if UnitExists(unit) then
                 local name = UnitName(unit) or unit
-                local _, classToken = UnitClass(unit)
+                local specID = GroupSpecFor(unit)
+                local classToken = CleanClassToken(unit, specID)
                 trackedPlayers[unit] = CarryOver(previous, unit, {
                     name = name, classToken = classToken,
-                    guid = UnitGUID(unit), specID = nil,
-                    data = ns.GetInterruptData(classToken, nil),
+                    guid = UnitGUID(unit), specID = specID,
+                    data = ns.GetInterruptData(classToken, specID),
                 })
-                inspect:Enqueue(unit)
             end
         end
     elseif inParty and p.showInParty then
@@ -619,13 +741,13 @@ local function RebuildRoster()
             local unit = "party" .. i
             if UnitExists(unit) then
                 local name = UnitName(unit) or unit
-                local _, classToken = UnitClass(unit)
+                local specID = GroupSpecFor(unit)
+                local classToken = CleanClassToken(unit, specID)
                 trackedPlayers[unit] = CarryOver(previous, unit, {
                     name = name, classToken = classToken,
-                    guid = UnitGUID(unit), specID = nil,
-                    data = ns.GetInterruptData(classToken, nil),
+                    guid = UnitGUID(unit), specID = specID,
+                    data = ns.GetInterruptData(classToken, specID),
                 })
-                inspect:Enqueue(unit)
             end
         end
     end
@@ -633,9 +755,9 @@ local function RebuildRoster()
     -- Local player (spec known immediately). Always tracked while grouped;
     -- when ungrouped it is the only bar, so "Show When Solo" gates it.
     if inParty or p.showSolo ~= false then
-        local _, classToken = UnitClass("player")
         local specIndex     = GetSpecialization()
         local specID        = specIndex and GetSpecializationInfo(specIndex) or nil
+        local classToken    = CleanClassToken("player", specID)
         trackedPlayers["player"] = CarryOver(previous, "player", {
             name = UnitName("player") or "Player",
             classToken = classToken,
@@ -649,7 +771,34 @@ local function RebuildRoster()
     RebuildPetGuidMap()
 
     RebuildDisplay()
-    C_Timer.After(0.2, function() inspect:Process() end)
+end
+
+-------------------------------------------------------------------------------
+--  Re-resolve tracked members against the comm spec cache. Called whenever
+--  LibSpecialization delivers new data: specs arrive asynchronously, so the
+--  roster is first built on class-only data and sharpened here as answers come
+--  in. Class-only never under-counts (GetInterruptData falls back to the class
+--  default), so an unknown spec degrades the estimate rather than losing the bar.
+-------------------------------------------------------------------------------
+local function ApplyGroupSpecs()
+    local changed = false
+    for unit, info in pairs(trackedPlayers) do
+        if unit ~= "player" then
+            local specID = GroupSpecFor(unit)
+            if specID and specID ~= info.specID then
+                info.specID = specID
+                -- The spec also yields a clean class token, which is the only
+                -- one available when UnitClass came back secret.
+                info.classToken = CleanClassToken(unit, specID) or info.classToken
+                info.data       = ns.GetInterruptData(info.classToken, specID)
+                changed         = true
+            end
+        end
+    end
+    if changed then
+        RebuildPetGuidMap()
+        RebuildDisplay()
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -745,7 +894,7 @@ local function ApplyInterruptCast(unit, info)
     info.kickState = "pending"
     C_Timer.After(0.05, function()
         if trackedPlayers[unit] ~= info then return end
-        info.kickState = HasRecentInterrupt() and "success" or "fail"
+        info.kickState = ClaimKickOutcome(unit)
         UpdateBarCDText(unit, info)
         C_Timer.After(3, function()
             if trackedPlayers[unit] ~= info then return end
@@ -763,12 +912,12 @@ end
 local eventFrame = CreateFrame("Frame")
 
 eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
-eventFrame:RegisterEvent("INSPECT_READY")
 eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 eventFrame:RegisterEvent("UNIT_SPELLCAST_SENT")
 eventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 eventFrame:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED")
+eventFrame:RegisterEvent("UNIT_SPELLCAST_CHANNEL_STOP")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -780,22 +929,6 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         -- Joining/leaving a group flips the solo fade rule; re-evaluate now
         -- instead of waiting for the next combat or zone change.
         RefreshFadeTarget()
-
-    elseif event == "INSPECT_READY" then
-        local guid = ...
-        for unit, info in pairs(trackedPlayers) do
-            if info.guid == guid then
-                local specID = GetInspectSpecialization(unit)
-                if specID and specID ~= 0 then
-                    info.specID = specID
-                    info.data   = ns.GetInterruptData(info.classToken, specID)
-                    RebuildPetGuidMap()
-                end
-                break
-            end
-        end
-        RebuildDisplay()
-        C_Timer.After(0.1, function() inspect:Process() end)
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
         local unit = ...
@@ -840,6 +973,10 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
 
         local matched, reason = MatchesInterrupt(spellID, info.data)
         if matched then
+            -- The local player's own spellID is never secret, so this branch is
+            -- always conclusive for them; remember it for the precedence rule
+            -- guarding the fallback below.
+            if actor == "player" then lastPlayerKickCast = GetTime() end
             ApplyInterruptCast(actor, info)
             return
         end
@@ -858,13 +995,26 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         -- The "ready" gate bounds the damage: a wrong guess can never stomp a
         -- running timer, only start one early.
         local p = db and db.profile
-        if p and p.assumeUnreadableCasts ~= false and InterruptIsReady(info) then
-            ApplyInterruptCast(actor, info)
-        end
+        if not (p and p.assumeUnreadableCasts ~= false and InterruptIsReady(info)) then return end
 
-    elseif event == "UNIT_SPELLCAST_INTERRUPTED" then
-        -- A cast was interrupted; record timestamp for the failed-kick correlation window
-        recentInterrupts[#recentInterrupts + 1] = { time = GetTime() }
+        -- Player precedence: nearly every party-member cast arrives unreadable,
+        -- so a member's unrelated spell landing alongside OUR kick would run the
+        -- fallback and start their cooldown for a kick they never pressed. When
+        -- the local player has a clean interrupt cast in the same window, that
+        -- one is the real kick and the guess is dropped.
+        if actor ~= "player" and (GetTime() - lastPlayerKickCast) <= PLAYER_PRECEDENCE then return end
+
+        ApplyInterruptCast(actor, info)
+
+    elseif event == "UNIT_SPELLCAST_INTERRUPTED" or event == "UNIT_SPELLCAST_CHANNEL_STOP" then
+        -- unit, castGUID, spellID, interruptedBy
+        local _, _, _, interruptedBy = ...
+        -- CHANNEL_STOP also fires when a channel simply ENDS; only an
+        -- interrupter GUID tells the two apart, so a bare stop is dropped
+        -- rather than counted as a kick landing. INTERRUPTED always means a
+        -- real interrupt and is kept even when the GUID is withheld.
+        if event == "UNIT_SPELLCAST_CHANNEL_STOP" and interruptedBy == nil then return end
+        recentInterrupts[#recentInterrupts + 1] = { time = GetTime(), guid = interruptedBy }
 
     elseif event == "PLAYER_REGEN_DISABLED" then
         RefreshFadeTarget()   -- fade in on combat start (always visible in instance)
@@ -954,6 +1104,23 @@ function EIT:OnEnable()
     -- Pre-allocate pool: never call CreateFrame in combat
     for i = 1, MAX_BARS do
         GetBarFrame(i, containerFrame):Hide()
+    end
+
+    -- Group spec intel over addon comms. Registering the callback is the whole
+    -- integration -- the lib requests and rebroadcasts on its own, so nothing
+    -- here ever calls its request functions. Writes only refresh the display on
+    -- an actual CHANGE, so the burst of answers on a group join costs table
+    -- writes plus a single rebuild.
+    local LS = LibStub and LibStub("LibSpecialization", true)
+    if LS then
+        LS.RegisterGroup(EIT, function(specID, _, _, playerName)
+            if type(specID) == "number" and type(playerName) == "string" then
+                if groupSpecs[playerName] ~= specID then
+                    groupSpecs[playerName] = specID
+                    ApplyGroupSpecs()
+                end
+            end
+        end)
     end
 
     CheckInstanceState()

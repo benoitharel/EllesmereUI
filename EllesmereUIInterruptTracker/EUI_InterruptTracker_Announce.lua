@@ -68,15 +68,22 @@ addonMsgFrame:SetScript("OnEvent", function(self, event, prefix, payload, channe
     local senderShort = Ambiguate(sender, "short")
     if senderShort == playerName then return end
 
-    -- Verify the sender is actually in the group (basic sanity check)
+    -- Verify the sender is actually in the group (basic sanity check).
+    -- UnitName can hand back a SECRET string for a group member; comparing one
+    -- is not an addon-side operation, so the roster name is skipped rather than
+    -- matched when it comes back secret.
+    local isSecret = issecretvalue or function() return false end
+    local function RosterMatches(unit)
+        local n = UnitName(unit)
+        if n == nil or isSecret(n) then return false end
+        return Ambiguate(n, "short") == senderShort
+    end
+
     local inGroup = false
-    if IsInRaid() then
+    local prefixToken = IsInRaid() and "raid" or (IsInGroup() and "party" or nil)
+    if prefixToken then
         for i = 1, GetNumGroupMembers() do
-            if Ambiguate(UnitName("raid"  .. i) or "", "short") == senderShort then inGroup = true; break end
-        end
-    elseif IsInGroup() then
-        for i = 1, GetNumGroupMembers() do
-            if Ambiguate(UnitName("party" .. i) or "", "short") == senderShort then inGroup = true; break end
+            if RosterMatches(prefixToken .. i) then inGroup = true; break end
         end
     end
     if not inGroup then return end

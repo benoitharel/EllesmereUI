@@ -31,8 +31,9 @@ ns.CLASS_INTERRUPT = {
 }
 
 -------------------------------------------------------------------------------
---  Spec overrides (keyed by WoW specID from GetSpecializationInfo /
---  GetInspectSpecialization).  false = no interrupt for this spec.
+--  Spec overrides (keyed by WoW specID from GetSpecializationInfo for the
+--  local player, or from LibSpecialization for group members).
+--  false = no interrupt for this spec.
 --
 --  Spec IDs (verified against WoW Midnight 12.0 data):
 --    256 = Discipline Priest
@@ -66,8 +67,10 @@ ns.SPEC_OVERRIDE = {
 --    false  - spec explicitly has no interrupt (Holy/Disc Priest)
 --    nil    - classToken unknown
 --
---  Spec override takes priority over class default.  specID may be nil when
---  not yet resolved (inspection pending); class default is used in that case.
+--  Spec override takes priority over class default.  specID may be nil when a
+--  group member's spec has not arrived over comms yet (or they run no
+--  LibSpecialization-embedding addon); the class default is used in that case,
+--  so an unknown spec only blurs the estimate -- it never drops the bar.
 -------------------------------------------------------------------------------
 function ns.GetInterruptData(classToken, specID)
     if specID then
